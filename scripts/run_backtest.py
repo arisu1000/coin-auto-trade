@@ -75,6 +75,32 @@ async def download_data(market: str, days: int) -> pd.DataFrame:
     return df[~df.index.duplicated(keep="first")]
 
 
+def parse_params(raw: list[str]) -> dict:
+    """
+    "key=value" 문자열 목록을 딕셔너리로 변환한다.
+    값은 int → float → str 순으로 자동 형변환된다.
+
+    예) ["entry_pct=5.0", "unit_amount=200000"] → {"entry_pct": 5.0, "unit_amount": 200000}
+    """
+    result = {}
+    for item in raw:
+        if "=" not in item:
+            print(f"경고: 잘못된 파라미터 형식 '{item}' (key=value 형식이어야 합니다)")
+            continue
+        key, _, raw_val = item.partition("=")
+        key = key.strip()
+        raw_val = raw_val.strip()
+        # 자동 형변환: int → float → str
+        try:
+            result[key] = int(raw_val)
+        except ValueError:
+            try:
+                result[key] = float(raw_val)
+            except ValueError:
+                result[key] = raw_val
+    return result
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(
         description="코인 자동매매 백테스트",
@@ -85,6 +111,10 @@ async def main() -> None:
   python scripts/run_backtest.py --data data/candles/KRW_BTC_90d.parquet --strategy momentum
   python scripts/run_backtest.py --data data/candles/KRW_BTC_90d.parquet --strategy turtle --capital 5000000
 
+  # 전략 파라미터 지정
+  python scripts/run_backtest.py --data data/candles/KRW_BTC_90d.parquet --strategy pyramid_breakout \\
+      --params entry_pct=5.0 stop_pct=3.0 trail_pct=8.0 unit_amount=500000
+
   # 데이터를 직접 다운로드
   python scripts/run_backtest.py --market KRW-BTC --days 30 --strategy momentum
         """,
@@ -92,6 +122,13 @@ async def main() -> None:
     parser.add_argument("--strategy", default="momentum", help="전략 이름")
     parser.add_argument("--capital", type=float, default=1_000_000, help="초기 자본금 원 (기본: 1,000,000)")
     parser.add_argument("--slippage", choices=["fixed", "conservative"], default="conservative")
+    parser.add_argument(
+        "--params",
+        nargs="*",
+        default=[],
+        metavar="KEY=VALUE",
+        help="전략 파라미터 (예: entry_pct=5.0 stop_pct=3.0 unit_amount=500000)",
+    )
 
     data_group = parser.add_mutually_exclusive_group()
     data_group.add_argument("--data", type=Path, help="사용할 Parquet 데이터 파일 경로")
@@ -106,8 +143,12 @@ async def main() -> None:
         print("\n오류: --data 또는 --market 중 하나를 지정하세요.")
         sys.exit(1)
 
+    strategy_params = parse_params(args.params)
+
     print(f"\n=== 백테스트 시작 ===")
     print(f"전략: {args.strategy} | 자본: {args.capital:,.0f}원")
+    if strategy_params:
+        print(f"파라미터: {strategy_params}")
 
     # 데이터 준비
     if args.data:
@@ -119,10 +160,10 @@ async def main() -> None:
 
     print(f"기간: {df.index[0].date()} ~ {df.index[-1].date()} ({len(df):,}개 봉)\n")
 
-    # 전략 로드
+    # 전략 로드 (파라미터 적용)
     from src.strategy.manager import StrategyManager
     manager = StrategyManager(Path("src/strategy"))
-    strategy = manager.load(args.strategy)
+    strategy = manager.load(args.strategy, params=strategy_params or None)
 
     # 슬리피지 모델 선택
     from src.backtest.slippage import ConservativeSlippage, FixedBpsSlippage

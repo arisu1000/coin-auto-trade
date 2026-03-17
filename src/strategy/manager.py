@@ -39,11 +39,16 @@ class StrategyManager:
     def active_strategy_name(self) -> str | None:
         return self._active_name
 
-    def load(self, name: str) -> Strategy:
+    def load(self, name: str, params: dict | None = None) -> Strategy:
         """
         전략 이름으로 인스턴스를 반환한다.
 
         파일 수정 시간(mtime)이 변경된 경우 모듈을 재로드한다.
+
+        Args:
+            name   : 전략 파일명 (확장자 제외)
+            params : 전략 생성자에 전달할 파라미터 딕셔너리.
+                     None이면 전략의 기본값을 사용한다.
         """
         module_path = self._dir / f"{name}.py"
         if not module_path.exists():
@@ -52,39 +57,40 @@ class StrategyManager:
         current_mtime = module_path.stat().st_mtime
         cached_mtime = self._mtimes.get(name, -1)
 
-        if name in self._classes and current_mtime == cached_mtime:
-            # 캐시된 버전 사용
-            return self._classes[name]()
+        if name not in self._classes or current_mtime != cached_mtime:
+            # 재로드: sys.modules에서 이전 모듈 완전 제거
+            module_key = f"strategy._hot_{name}"
+            if module_key in sys.modules:
+                del sys.modules[module_key]
 
-        # 재로드: sys.modules에서 이전 모듈 완전 제거
-        module_key = f"strategy._hot_{name}"
-        if module_key in sys.modules:
-            del sys.modules[module_key]
+            spec = importlib.util.spec_from_file_location(module_key, module_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"전략 모듈 스펙 생성 실패: {module_path}")
 
-        spec = importlib.util.spec_from_file_location(module_key, module_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"전략 모듈 스펙 생성 실패: {module_path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)  # type: ignore[union-attr]
 
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)  # type: ignore[union-attr]
+            # 모듈에서 Strategy 서브클래스 탐색
+            strategy_class = self._find_strategy_class(module, name)
+            if strategy_class is None:
+                raise TypeError(
+                    f"'{module_path}'에서 Strategy 서브클래스를 찾을 수 없습니다. "
+                    "Strategy를 상속받은 클래스가 있어야 합니다."
+                )
 
-        # 모듈에서 Strategy 서브클래스 탐색
-        strategy_class = self._find_strategy_class(module, name)
-        if strategy_class is None:
-            raise TypeError(
-                f"'{module_path}'에서 Strategy 서브클래스를 찾을 수 없습니다. "
-                "Strategy를 상속받은 클래스가 있어야 합니다."
-            )
+            self._modules[name] = module
+            self._classes[name] = strategy_class
+            self._mtimes[name] = current_mtime
 
-        self._modules[name] = module
-        self._classes[name] = strategy_class
-        self._mtimes[name] = current_mtime
+            if cached_mtime > 0:
+                logger.info("strategy_hot_reloaded", name=name, path=str(module_path))
+            else:
+                logger.info("strategy_loaded", name=name, path=str(module_path))
 
-        if cached_mtime > 0:
-            logger.info("strategy_hot_reloaded", name=name, path=str(module_path))
-        else:
-            logger.info("strategy_loaded", name=name, path=str(module_path))
-
+        strategy_class = self._classes[name]
+        if params:
+            logger.info("strategy_params_applied", name=name, params=params)
+            return strategy_class(**params)
         return strategy_class()
 
     def activate(self, name: str) -> Strategy:
