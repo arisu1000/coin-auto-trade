@@ -89,13 +89,17 @@ def get_missing_range(
     earliest = cached.index[0]
     latest = cached.index[-1]
 
-    # 캐시가 요청 구간을 완전히 커버하면 최신 이후만 갱신
-    if earliest <= need_from:
+    # API는 1분봉 경계로 반환하므로 need_from과 earliest 사이에
+    # 최대 수 분의 오차가 생긴다. 1시간 여유를 두어 재다운로드를 방지한다.
+    tolerance = timedelta(hours=1)
+
+    # 캐시가 요청 구간을 충분히 커버하면 최신 이후만 갱신
+    if earliest <= need_from + tolerance:
         if (now - latest) <= _FRESH_THRESHOLD:
             return latest, latest  # 갱신 불필요 신호 (동일 값)
         return latest, now
 
-    # 캐시가 요청 구간보다 짧으면 전체 재수집
+    # 캐시가 요청 구간보다 많이 짧으면 전체 재수집
     return None, now
 
 

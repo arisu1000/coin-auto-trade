@@ -118,6 +118,21 @@ class TestGetMissingRange:
         # 캐시가 최신이면 fetch_from == fetch_until
         assert fetch_from == fetch_until
 
+    def test_cache_earliest_slightly_after_need_from_is_not_redownloaded(self, tmp_cache_dir):
+        """API 1분봉 경계 오차로 earliest가 need_from보다 수 분 늦어도 재다운로드 안 함"""
+        now = datetime.now(tz=timezone.utc)
+        # need_from = now - 7days. 캐시 시작을 need_from보다 30분 늦게 설정 (API 오차 시뮬레이션)
+        cache_start = now - timedelta(days=7) + timedelta(minutes=30)
+        stale_end = now - timedelta(hours=2)
+        minutes = int((stale_end - cache_start).total_seconds() / 60)
+        df = _make_df(cache_start, minutes=minutes)
+        save_cache("KRW-BTC", 1, df)
+
+        fetch_from, fetch_until = get_missing_range("KRW-BTC", 1, days=7)
+        # tolerance(1h) 이내 오차이므로 재다운로드 없이 증분 갱신으로 처리돼야 함
+        assert fetch_from is not None  # None이면 전체 재다운로드 → 버그
+        assert fetch_from < fetch_until
+
     def test_stale_cache_returns_latest_as_from(self, tmp_cache_dir):
         now = datetime.now(tz=timezone.utc)
         stale_end = now - timedelta(hours=3)
@@ -130,7 +145,7 @@ class TestGetMissingRange:
 
     def test_short_cache_triggers_full_download(self, tmp_cache_dir):
         now = datetime.now(tz=timezone.utc)
-        # 1일치 캐시만 있는데 7일치를 요청
+        # 1일치 캐시만 있는데 7일치를 요청 (tolerance 1h보다 훨씬 짧음)
         df = _make_df(now - timedelta(days=1), minutes=24 * 60)
         save_cache("KRW-BTC", 1, df)
 
