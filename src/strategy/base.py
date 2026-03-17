@@ -12,9 +12,11 @@ import pandas as pd
 
 class TradingSignal(IntEnum):
     """매매 시그널 표준 열거형"""
-    SELL = -1
-    HOLD = 0
-    BUY = 1
+    SHORT = -2   # 숏 진입 / 숏 피라미딩 추가
+    SELL  = -1   # 롱 청산
+    HOLD  =  0
+    BUY   =  1   # 롱 진입 / 롱 피라미딩 추가
+    COVER =  2   # 숏 청산
 
 
 class Strategy(ABC):
