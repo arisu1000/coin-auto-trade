@@ -4,11 +4,6 @@
 업비트 수수료(0.05%) + 슬리피지를 반영한 고정밀 시뮬레이션.
 종가 체결이 아닌 보수적 체결 가정(매수: 고가 방향, 매도: 저가 방향)으로
 곡선 적합(Overfitting)을 방지한다.
-
-롱 전용 전략 (BUY/SELL):
-    unit_amount 미설정 → 진입 시 전액 투자, 청산 시 전량 매도.
-롱/숏 피라미딩 전략 (BUY/SELL/SHORT/COVER):
-    unit_amount 설정 → 매 시그널마다 unit_amount씩 진입.
 """
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -85,102 +80,56 @@ class BacktestEngine:
             BacktestResult (지표 포함)
         """
         df = df.copy().sort_index()
-        df = self._strategy.get_indicators(df)
-        signals = self._strategy.generate_signals(df)
 
-        # 전략에 unit_amount가 있으면 피라미딩 모드
-        unit_amount: float | None = getattr(self._strategy, "unit_amount", None)
+        # 기술적 지표 계산 (전략이 get_indicators를 구현한 경우)
+        df = self._strategy.get_indicators(df)
+
+        # 전체 구간에 대한 시그널 일괄 계산
+        signals = self._strategy.generate_signals(df)
 
         portfolio = Portfolio(initial_capital)
         equity_curve: list[float] = []
         trade_records: list[TradeRecord] = []
 
-        # 롱 포지션 추적
-        long_entry_time: datetime | None = None
-        long_entry_fee_total: float = 0.0
-
-        # 숏 포지션 추적
-        short_entry_time: datetime | None = None
-        short_entry_fee_total: float = 0.0
+        entry_time = None
+        entry_price = 0.0
+        entry_fee = 0.0
 
         for i, (timestamp, bar) in enumerate(df.iterrows()):
             current_signal = signals.iloc[i]
 
-            # ── 롱 진입 / 피라미딩 ─────────────────────────────
-            if current_signal == TradingSignal.BUY:
-                # unit_amount 모드: 포지션 있어도 피라미딩 허용
-                # all-in 모드: 포지션 없을 때만 진입
-                can_buy = (unit_amount is not None) or (not portfolio.has_long_position)
-                if can_buy and portfolio.cash > 0:
-                    exec_price = self._slippage.buy_price(bar)
-                    size = unit_amount if unit_amount is not None else portfolio.cash
-                    size = min(size, portfolio.cash)
-                    qty = (size - self._fee.calculate(size)) / exec_price
-                    fee_amount = self._fee.calculate(exec_price * qty)
-                    if qty > 0:
-                        if long_entry_time is None:
-                            long_entry_time = timestamp
-                            long_entry_fee_total = 0.0
-                        portfolio.enter_long(exec_price, qty, fee_amount)
-                        long_entry_fee_total += fee_amount
+            # ── 포지션 진입 ────────────────────────────────────
+            if current_signal == TradingSignal.BUY and not portfolio.has_position:
+                # 보수적 체결: 고가 방향으로 슬리피지 적용
+                exec_price = self._slippage.buy_price(bar)
+                fee_amount = self._fee.calculate(exec_price * portfolio.max_quantity(exec_price))
+                qty = portfolio.max_quantity(exec_price) * (1 - self._fee.rate)
 
-            # ── 롱 청산 ────────────────────────────────────────
-            elif current_signal == TradingSignal.SELL and portfolio.has_long_position:
+                if qty > 0:
+                    portfolio.enter_long(exec_price, qty, fee_amount)
+                    entry_time = timestamp
+                    entry_price = exec_price
+                    entry_fee = fee_amount
+
+            # ── 포지션 청산 ────────────────────────────────────
+            elif current_signal == TradingSignal.SELL and portfolio.has_position:
+                # 보수적 체결: 저가 방향으로 슬리피지 적용
                 exec_price = self._slippage.sell_price(bar)
-                avg_entry = portfolio.long_avg_price
-                qty_closed = portfolio.long_qty
-                fee_amount = self._fee.calculate(exec_price * qty_closed)
+                fee_amount = self._fee.calculate(exec_price * portfolio.position_size)
                 pnl = portfolio.exit_long(exec_price, fee_amount)
+
+                gross_pnl_pct = (exec_price - entry_price) / entry_price * 100
                 trade_records.append(TradeRecord(
-                    entry_time=long_entry_time or timestamp,
+                    entry_time=entry_time,
                     exit_time=timestamp,
                     side="long",
-                    entry_price=avg_entry,
+                    entry_price=entry_price,
                     exit_price=exec_price,
-                    quantity=qty_closed,
+                    quantity=portfolio.position_size,
                     pnl=pnl,
-                    pnl_pct=(exec_price - avg_entry) / avg_entry * 100 if avg_entry else 0.0,
-                    fee_total=long_entry_fee_total + fee_amount,
+                    pnl_pct=gross_pnl_pct,
+                    fee_total=entry_fee + fee_amount,
                 ))
-                long_entry_time = None
-                long_entry_fee_total = 0.0
-
-            # ── 숏 진입 / 피라미딩 ─────────────────────────────
-            elif current_signal == TradingSignal.SHORT:
-                can_short = (unit_amount is not None) or (not portfolio.has_short_position)
-                if can_short and portfolio.cash > 0:
-                    exec_price = self._slippage.sell_price(bar)  # 숏은 매도 방향
-                    size = unit_amount if unit_amount is not None else portfolio.cash
-                    size = min(size, portfolio.cash)
-                    qty = (size - self._fee.calculate(size)) / exec_price
-                    fee_amount = self._fee.calculate(exec_price * qty)
-                    if qty > 0:
-                        if short_entry_time is None:
-                            short_entry_time = timestamp
-                            short_entry_fee_total = 0.0
-                        portfolio.enter_short(exec_price, qty, fee_amount)
-                        short_entry_fee_total += fee_amount
-
-            # ── 숏 청산 ────────────────────────────────────────
-            elif current_signal == TradingSignal.COVER and portfolio.has_short_position:
-                exec_price = self._slippage.buy_price(bar)  # 숏 청산은 매수 방향
-                avg_short = portfolio.short_avg_price
-                qty_short = portfolio.short_qty
-                fee_amount = self._fee.calculate(exec_price * qty_short)
-                pnl = portfolio.exit_short(exec_price, fee_amount)
-                trade_records.append(TradeRecord(
-                    entry_time=short_entry_time or timestamp,
-                    exit_time=timestamp,
-                    side="short",
-                    entry_price=avg_short,
-                    exit_price=exec_price,
-                    quantity=qty_short,
-                    pnl=pnl,
-                    pnl_pct=(avg_short - exec_price) / avg_short * 100 if avg_short else 0.0,
-                    fee_total=short_entry_fee_total + fee_amount,
-                ))
-                short_entry_time = None
-                short_entry_fee_total = 0.0
 
             equity_curve.append(portfolio.total_equity(bar["close"]))
 
