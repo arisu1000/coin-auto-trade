@@ -12,8 +12,12 @@
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 import structlog
+
+if TYPE_CHECKING:
+    from src.persistence.repositories.kill_switch import KillSwitchRepository
 
 logger = structlog.get_logger(__name__)
 
@@ -50,6 +54,7 @@ class KillSwitchCoordinator:
         self._peak_equity: float = 0.0
         self._events: list[KillSwitchEvent] = []
         self._event_callbacks: list = []
+        self._repo: "KillSwitchRepository | None" = None
 
     # ── 상태 쿼리 ────────────────────────────────────────────────────
 
@@ -90,6 +95,7 @@ class KillSwitchCoordinator:
         """
         if current_equity > self._peak_equity:
             self._peak_equity = current_equity
+            await self._persist()
 
         if self._peak_equity == 0:
             return False
@@ -123,6 +129,7 @@ class KillSwitchCoordinator:
         event = KillSwitchEvent(event_type="manual", reason=reason)
         self._events.append(event)
         logger.critical("kill_switch_manual_halt", reason=reason)
+        await self._persist()
         await self._notify(event)
 
     async def reset(self, confirm: bool = False) -> None:
@@ -135,11 +142,36 @@ class KillSwitchCoordinator:
         event = KillSwitchEvent(event_type="reset", reason="관리자 리셋")
         self._events.append(event)
         logger.warning("kill_switch_reset")
+        await self._persist()
         await self._notify(event)
 
     def register_callback(self, callback) -> None:
         """킬 스위치 이벤트 콜백 등록 (텔레그램 알림용)"""
         self._event_callbacks.append(callback)
+
+    async def init_persistence(self, repo: "KillSwitchRepository") -> None:
+        """
+        DB 저장소를 연결하고 이전 상태를 복원한다.
+        trader._initialize()에서 DB 연결 직후 호출한다.
+        """
+        self._repo = repo
+        state = await repo.load()
+        if not state:
+            return
+
+        self._macro_active = bool(state.get("macro_active", False))
+        self._manual_halt = bool(state.get("manual_halt", False))
+        self._peak_equity = float(state.get("peak_equity", 0.0))
+        self._micro_active_markets = set(state.get("micro_blocked_markets", []))
+
+        if self._macro_active or self._manual_halt or self._micro_active_markets:
+            logger.warning(
+                "kill_switch_state_restored",
+                macro_active=self._macro_active,
+                manual_halt=self._manual_halt,
+                blocked_markets=list(self._micro_active_markets),
+                peak_equity=self._peak_equity,
+            )
 
     # ── 내부 메서드 ──────────────────────────────────────────────────
 
@@ -156,6 +188,7 @@ class KillSwitchCoordinator:
             drawdown_pct=drawdown_pct,
             threshold=self._macro_threshold,
         )
+        await self._persist()
         await self._notify(event)
 
     async def _trigger_micro(self, market: str, loss_pct: float) -> None:
@@ -171,7 +204,19 @@ class KillSwitchCoordinator:
             market=market,
             loss_pct=loss_pct,
         )
+        await self._persist()
         await self._notify(event)
+
+    async def _persist(self) -> None:
+        """현재 상태를 DB에 저장한다."""
+        if self._repo is None:
+            return
+        await self._repo.save({
+            "macro_active": self._macro_active,
+            "manual_halt": self._manual_halt,
+            "peak_equity": self._peak_equity,
+            "micro_blocked_markets": list(self._micro_active_markets),
+        })
 
     async def _notify(self, event: KillSwitchEvent) -> None:
         for cb in self._event_callbacks:

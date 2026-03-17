@@ -89,6 +89,18 @@ class UpbitClient:
         data = await self._get("/orderbook", params=params, use_exchange_bucket=False)
         return [self._parse_orderbook(ob) for ob in data]
 
+    async def get_markets(self, krw_only: bool = True) -> list[dict]:
+        """
+        업비트 전체 마켓 목록 조회
+
+        Returns:
+            [{"market": "KRW-BTC", "korean_name": "비트코인", ...}, ...]
+        """
+        data = await self._get("/market/all", params={}, use_exchange_bucket=False)
+        if krw_only:
+            return [m for m in data if m["market"].startswith("KRW-")]
+        return data
+
     async def get_ticker(self, markets: list[str]) -> list[dict]:
         """현재가 조회"""
         params = {"markets": ",".join(markets)}

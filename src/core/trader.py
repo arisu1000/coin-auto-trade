@@ -27,6 +27,7 @@ from src.exchange.websocket_stream import OrderbookStream
 from src.kill_switch.coordinator import KillSwitchCoordinator
 from src.persistence.database import Database
 from src.persistence.migrations import run_migrations
+from src.persistence.repositories.kill_switch import KillSwitchRepository
 from src.persistence.repositories.portfolio import PortfolioRepository
 from src.persistence.repositories.trades import TradeRepository
 from src.strategy.manager import StrategyManager
@@ -57,6 +58,7 @@ class Trader:
         self._latest_candles: dict[str, pd.DataFrame] = {}
         self._latest_orderbooks: dict = {}
         self._active_orders: dict = {}  # uuid → Order
+        self._held_markets: set[str] = set()  # 현재 보유 중인 코인의 마켓 코드
         self._running = False
 
     async def run(self) -> None:
@@ -98,6 +100,7 @@ class Trader:
             macro_threshold_pct=self._settings.macro_max_drawdown_pct,
             micro_threshold_pct=self._settings.micro_stop_loss_pct,
         )
+        await self._coordinator.init_persistence(KillSwitchRepository(self._db))
 
         # 전략 매니저
         strategy_dir = Path("src/strategy")
@@ -128,7 +131,31 @@ class Trader:
             )
         )
 
+        # 시작 시 현재 보유 코인 파악 (TARGET_MARKETS 외 보유분도 즉시 감시 시작)
+        try:
+            balances = await self._upbit_ctx.get_balances()
+            self._held_markets = {
+                f"KRW-{b.currency}"
+                for b in balances
+                if b.currency != "KRW" and b.available > 0
+            }
+            if self._held_markets:
+                logger.info("held_markets_detected", markets=sorted(self._held_markets))
+        except Exception as e:
+            logger.warning("held_markets_fetch_failed", error=str(e))
+
         logger.info("trader_initialized")
+
+    @property
+    def _active_markets(self) -> list[str]:
+        """
+        TARGET_MARKETS + 현재 보유 중인 코인 마켓의 합집합.
+
+        보유 코인은 TARGET_MARKETS에 없더라도 캔들 수집과 신호 생성 대상에 포함된다.
+        단, 매수(BUY) 실행은 TARGET_MARKETS에 있는 코인만 허용한다.
+        """
+        combined = set(self._settings.markets_list) | self._held_markets
+        return sorted(combined)
 
     async def _shutdown(self) -> None:
         """정상 종료"""
@@ -147,7 +174,7 @@ class Trader:
         """캔들 데이터 갱신 루프 (매 interval마다)"""
         while self._running:
             try:
-                for market in self._settings.markets_list:
+                for market in self._active_markets:
                     candles = await self._upbit_ctx.get_candles_minutes(
                         market, unit=1, count=100
                     )
@@ -172,7 +199,8 @@ class Trader:
 
         while self._running:
             try:
-                for market in self._settings.markets_list:
+                target_set = set(self._settings.markets_list)
+                for market in self._active_markets:
                     if self._coordinator.is_market_blocked(market):
                         continue
 
@@ -193,17 +221,22 @@ class Trader:
                     confidence = result.get("judge_confidence", 0.0)
                     position_size_pct = result.get("position_size_pct", 0.0)
 
+                    # TARGET_MARKETS 밖 보유 코인은 매수 불가, 매도만 허용
+                    allow_buy = market in target_set
+
                     logger.info(
                         "agent_decision",
                         market=market,
                         decision=decision,
                         confidence=confidence,
                         position_size_pct=position_size_pct,
+                        allow_buy=allow_buy,
                     )
 
                     if decision != "HOLD" and confidence > 0.6:
                         await self._execute_decision(
-                            market, decision, position_size_pct, result
+                            market, decision, position_size_pct, result,
+                            allow_buy=allow_buy,
                         )
 
                 await asyncio.sleep(self._settings.trade_interval_seconds)
@@ -228,6 +261,13 @@ class Trader:
                 )
                 total_equity = krw + coin_value
 
+                # 보유 코인 목록 갱신 (_active_markets에 반영)
+                self._held_markets = {
+                    f"KRW-{b.currency}"
+                    for b in balances
+                    if b.currency != "KRW" and b.available > 0
+                }
+
                 await repo.snapshot(
                     total_krw=krw,
                     coin_value=coin_value,
@@ -251,6 +291,7 @@ class Trader:
         decision: str,
         position_size_pct: float,
         agent_result: dict,
+        allow_buy: bool = True,
     ) -> None:
         """AI 결정 → 실제 주문 발주"""
         if self._settings.is_paper:
@@ -259,6 +300,7 @@ class Trader:
                 market=market,
                 decision=decision,
                 position_size_pct=position_size_pct,
+                allow_buy=allow_buy,
             )
             return
 
@@ -269,6 +311,10 @@ class Trader:
             coin_balance = next(
                 (b for b in balances if b.currency == coin_currency), None
             )
+
+            if decision == "BUY" and not allow_buy:
+                logger.info("buy_skipped_not_in_target_markets", market=market)
+                return
 
             if decision == "BUY":
                 invest_amount = krw * (position_size_pct / 100)
