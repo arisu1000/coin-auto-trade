@@ -121,8 +121,28 @@ class BacktestReport:
             "final_capital": round(self.equity_curve[-1] if self.equity_curve else 0, 0),
         }
 
+    def side_breakdown(self) -> dict:
+        """롱/숏별 거래 통계 (롱/숏 전략에서만 의미 있음)"""
+        result = {}
+        for side in ("long", "short"):
+            trades = [t for t in self.trade_records if t.side == side]
+            if not trades:
+                continue
+            wins = sum(1 for t in trades if t.pnl > 0)
+            total_pnl = sum(t.pnl for t in trades)
+            gross_profit = sum(t.pnl for t in trades if t.pnl > 0)
+            gross_loss = abs(sum(t.pnl for t in trades if t.pnl < 0))
+            result[side] = {
+                "trades": len(trades),
+                "win_rate_pct": round(wins / len(trades) * 100, 1),
+                "total_pnl": round(total_pnl, 0),
+                "profit_factor": round(gross_profit / gross_loss, 3)
+                                 if gross_loss else float("inf"),
+            }
+        return result
+
     def summary_text(self) -> str:
-        """텔레그램 메시지용 텍스트 요약"""
+        """텍스트 요약"""
         s = self.summary()
         lines = [
             "📊 백테스트 결과",
@@ -134,4 +154,16 @@ class BacktestReport:
             f"총 거래 횟수: {s['total_trades']}",
             f"최종 자산: {s['final_capital']:,.0f}원",
         ]
+        breakdown = self.side_breakdown()
+        if len(breakdown) > 1:
+            lines.append("")
+            lines.append("[포지션별 분석]")
+            for side, stat in breakdown.items():
+                label = "롱" if side == "long" else "숏"
+                lines.append(
+                    f"  {label}: {stat['trades']}회 | "
+                    f"승률 {stat['win_rate_pct']}% | "
+                    f"수익팩터 {stat['profit_factor']} | "
+                    f"손익 {stat['total_pnl']:+,.0f}원"
+                )
         return "\n".join(lines)
