@@ -249,8 +249,30 @@ python scripts/run_backtest.py \
   --market KRW-ETH \            # 마켓 코드
   --days 90 \                   # 기간 (일)
   --capital 5000000 \           # 초기 자본금 (원)
-  --slippage conservative       # 슬리피지 모델 (fixed / conservative)
+  --slippage conservative \     # 슬리피지 모델 (fixed / conservative)
+  --refresh                     # 캐시 무시하고 데이터 재다운로드
 ```
+
+### 캔들 데이터 캐시
+
+백테스트를 처음 실행하면 업비트에서 캔들 데이터를 다운로드하여 `data/candles/` 폴더에 저장합니다. 이후 같은 마켓을 다시 실행하면 저장된 데이터를 재사용하고, 마지막 봉 이후분만 추가로 받아옵니다.
+
+```
+처음 실행          → 전체 다운로드 → data/candles/KRW_BTC_1m.parquet 저장
+이후 실행 (5분 이내) → 다운로드 없이 캐시 즉시 반환
+이후 실행 (오래됨)  → 마지막 봉 이후만 증분 다운로드 후 병합
+--refresh 옵션     → 캐시 무시, 처음부터 전체 재다운로드
+```
+
+```bash
+# 평상시 (캐시 자동 활용, 빠름)
+python scripts/run_backtest.py --strategy turtle --days 90
+
+# 데이터가 이상하거나 처음부터 다시 받고 싶을 때
+python scripts/run_backtest.py --strategy turtle --days 90 --refresh
+```
+
+> 캐시 파일은 `data/candles/` 에 마켓별로 저장되며 git에는 포함되지 않습니다.
 
 ### 결과 해석
 
@@ -466,6 +488,19 @@ ls -la src/strategy/
 # 오래된 로그 정리 (30일 이상)
 sqlite3 data/db/trading.db \
   "DELETE FROM bot_logs WHERE created_at < datetime('now', '-30 days'); VACUUM;"
+```
+
+### Q: 백테스트가 매번 데이터를 새로 받아요 / 캐시를 지우고 싶어요
+
+```bash
+# 캐시 파일 목록 확인
+ls data/candles/
+
+# 특정 마켓 캐시 삭제 (다음 실행 시 전체 재다운로드)
+rm data/candles/KRW_BTC_1m.parquet
+
+# 또는 --refresh 플래그로 캐시 무시
+python scripts/run_backtest.py --strategy momentum --days 30 --refresh
 ```
 
 ### Q: Docker 없이 로컬에서 실행하고 싶어요

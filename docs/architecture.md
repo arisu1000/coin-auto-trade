@@ -98,6 +98,28 @@ judge_decision: "BUY" | "SELL" | "HOLD"
 SQLite trades 테이블에 기록
 ```
 
+## 백테스트 캔들 캐시 흐름
+
+```
+run_backtest.py 실행
+    ↓
+candle_cache.get_missing_range()
+    │
+    ├─ 캐시 없음 ──────────────────→ 업비트 전체 구간 다운로드
+    │                                      ↓
+    ├─ 캐시 있음 + 최신 (5분 이내) → 다운로드 없이 즉시 반환
+    │
+    └─ 캐시 있음 + 오래됨 ─────────→ 마지막 봉 이후만 증분 다운로드
+                                           ↓
+                              기존 캐시 + 새 데이터 병합 (중복 제거)
+                                           ↓
+                              data/candles/{MARKET}_{UNIT}m.parquet 저장
+                                           ↓
+                              요청 기간만큼 슬라이싱 후 반환
+```
+
+캐시 파일은 `data/candles/` 에 마켓·봉 단위별로 저장되며, `.gitignore`에 포함되어 저장소에는 커밋되지 않습니다.
+
 ---
 
 ## 킬 스위치 이중 방어 체계

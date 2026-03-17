@@ -100,6 +100,10 @@ python scripts/run_backtest.py \
   --slippage conservative
 ```
 
+캔들 데이터는 처음 실행 시 `data/candles/` 에 자동 저장됩니다.
+이후 같은 마켓으로 재실행하면 저장된 캐시를 재사용하고 빠진 구간만 추가로 받습니다.
+처음부터 다시 받으려면 `--refresh` 옵션을 추가하세요.
+
 ---
 
 ## 실거래 전환 (주의!)
