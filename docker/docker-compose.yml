@@ -1,0 +1,35 @@
+version: "3.9"
+
+services:
+  trader:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    platform: linux/arm64  # Apple Silicon 네이티브 (에뮬레이션 없음)
+    container_name: coin-trader
+    env_file:
+      - ../.env
+    volumes:
+      # SQLite DB 영속성 (호스트 디스크에 보존)
+      - ../data/db:/app/data/db
+      # 소스 코드 마운트 (핫 리로딩 지원 - 컨테이너 재시작 불필요)
+      - ../src:/app/src:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import src"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    # 메모리 제한 (OOM 방지)
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 512m

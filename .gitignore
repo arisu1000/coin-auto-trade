@@ -1,0 +1,37 @@
+# 환경 설정 (절대 커밋 금지)
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+
+# 데이터베이스 (로컬 DB는 커밋 안 함)
+data/db/*.db
+data/db/*.db-shm
+data/db/*.db-wal
+
+# Docker
+docker/scripts/*.sh.bak
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 가상환경
+.venv/
+venv/
+
+# 메모리 (로컬 전용)
+memory/

@@ -1,0 +1,36 @@
+# ─── 비동기 HTTP / WebSocket ───
+aiohttp==3.10.11
+aiosqlite==0.20.0
+websockets==13.1
+
+# ─── 업비트 JWT 인증 ───
+python-jose[cryptography]==3.3.0
+
+# ─── 설정 관리 ───
+pydantic==2.9.2
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+
+# ─── LangGraph / LangChain ───
+langgraph==0.2.53
+langchain==0.3.12
+langchain-openai==0.2.12
+langchain-core==0.3.25
+openai==1.57.4
+
+# ─── 기술적 분석 (C 라이브러리 필요 - Dockerfile에서 빌드) ───
+ta-lib==0.4.32
+pandas==2.2.3
+numpy==1.26.4
+
+# ─── 텔레그램 봇 (비동기 v21) ───
+python-telegram-bot==21.9
+
+# ─── 구조화 로깅 ───
+structlog==24.4.0
+
+# ─── HTTP 재시도 유틸리티 ───
+tenacity==9.0.0
+
+# ─── 데이터 캐싱 (캔들 데이터 parquet 저장) ───
+pyarrow==18.1.0

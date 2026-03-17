@@ -1,0 +1,15 @@
+-r requirements.txt
+
+# ─── 테스트 프레임워크 ───
+pytest==8.3.4
+pytest-asyncio==0.24.0
+pytest-cov==6.0.0
+pytest-mock==3.14.0
+respx==0.21.1          # aiohttp 트랜스포트 레벨 Mock
+freezegun==1.5.1       # 시간 Mock (Rate Limiter 테스트용)
+faker==33.1.0
+
+# ─── 코드 품질 ───
+ruff==0.8.4
+mypy==1.13.0
+types-python-jose==3.3.4
