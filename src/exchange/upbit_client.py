@@ -230,7 +230,7 @@ class UpbitClient:
         return Candle(
             market=data["market"],
             timestamp=datetime.fromisoformat(
-                data["candle_date_time_kst"].replace("T", " ")
+                data["candle_date_time_utc"].replace("T", " ")
             ),
             open=float(data["opening_price"]),
             high=float(data["high_price"]),
