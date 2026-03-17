@@ -20,6 +20,9 @@ data/db/*.db
 data/db/*.db-shm
 data/db/*.db-wal
 
+# 캔들 캐시 (로컬 전용, 용량 큼)
+data/candles/*.parquet
+
 # Docker
 docker/scripts/*.sh.bak
 
