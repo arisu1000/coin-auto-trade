@@ -256,11 +256,16 @@ class Trader:
         while self._running:
             try:
                 for market in self._active_markets:
-                    candles = await self._upbit_ctx.get_candles_minutes(
-                        market,
-                        unit=self._settings.candle_unit_minutes,
-                        count=self._settings.candle_count,
-                    )
+                    if self._settings.candle_unit_minutes == 0:
+                        candles = await self._upbit_ctx.get_candles_days(
+                            market, count=self._settings.candle_count
+                        )
+                    else:
+                        candles = await self._upbit_ctx.get_candles_minutes(
+                            market,
+                            unit=self._settings.candle_unit_minutes,
+                            count=self._settings.candle_count,
+                        )
                     if candles:
                         df = self._candles_to_df(candles)
                         df = self._compute_indicators(df)

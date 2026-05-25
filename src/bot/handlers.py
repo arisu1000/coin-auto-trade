@@ -247,7 +247,7 @@ class CommandHandlers:
             f"  전략: <code>{s.default_strategy}</code>\n"
             f"  대상 마켓: {markets}\n"
             f"  매매 주기: {s.trade_interval_seconds}초\n"
-            f"  캔들: {s.candle_unit_minutes}분봉 × {s.candle_count}개 (≈{s.candle_unit_minutes * s.candle_count // 60}시간)\n\n"
+            f"  캔들: {'일봉' if s.candle_unit_minutes == 0 else f'{s.candle_unit_minutes}분봉'} × {s.candle_count}개\n\n"
             f"<b>리스크 관리</b>\n"
             f"  최대 낙폭 (매크로 킬스위치): {s.macro_max_drawdown_pct}%\n"
             f"  손절 (마이크로 킬스위치): {s.micro_stop_loss_pct}%\n"

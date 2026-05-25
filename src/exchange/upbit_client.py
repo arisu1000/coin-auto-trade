@@ -83,6 +83,16 @@ class UpbitClient:
         )
         return [self._parse_candle(c) for c in data]
 
+    async def get_candles_days(
+        self, market: str, count: int = 200, to: str | None = None
+    ) -> list[Candle]:
+        """일봉 캔들 조회 (최대 200개)"""
+        params: dict[str, Any] = {"market": market, "count": min(count, 200)}
+        if to:
+            params["to"] = to
+        data = await self._get("/candles/days", params=params, use_exchange_bucket=False)
+        return [self._parse_candle(c) for c in data]
+
     async def get_orderbook(self, markets: list[str]) -> list[OrderBook]:
         """호가창 조회"""
         params = {"markets": ",".join(markets)}
