@@ -145,6 +145,17 @@ class KillSwitchCoordinator:
         await self._persist()
         await self._notify(event)
 
+    async def reset_market(self, market: str) -> bool:
+        """특정 마켓의 마이크로 킬스위치만 해제한다. 차단 상태가 아니면 False 반환."""
+        if market not in self._micro_active_markets:
+            return False
+        self._micro_active_markets.discard(market)
+        event = KillSwitchEvent(event_type="reset", reason=f"{market} 개별 해제")
+        self._events.append(event)
+        logger.warning("kill_switch_market_reset", market=market)
+        await self._persist()
+        return True
+
     def register_callback(self, callback) -> None:
         """킬 스위치 이벤트 콜백 등록 (텔레그램 알림용)"""
         self._event_callbacks.append(callback)

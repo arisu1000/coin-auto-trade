@@ -38,7 +38,7 @@ class CommandHandlers:
             f"/pyramid_status - 피라미딩 포지션 상태 조회\n\n"
             f"<b>제어</b>\n"
             f"/halt - 매매 중단 (킬스위치)\n"
-            f"/resume - 매매 재개\n"
+            f"/resume [마켓] - 매매 재개 (마켓 지정 시 해당 마켓 킬스위치만 해제)\n"
             f"/strategy [이름] - 전략 변경\n"
             f"/backtest [전략] [일수] - 백테스트 실행\n\n"
             f"<b>피라미딩 동기화</b>\n"
@@ -123,15 +123,32 @@ class CommandHandlers:
         )
 
     async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """킬 스위치 해제"""
+        """킬 스위치 해제. /resume [마켓] 으로 특정 마켓만 해제 가능."""
         if not self._coordinator:
             await update.message.reply_text("❌ 코디네이터가 초기화되지 않았습니다")
             return
-        try:
-            await self._coordinator.reset(confirm=True)
-            await update.message.reply_text("✅ 킬 스위치 해제 완료. 매매를 재개합니다.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ 해제 실패: {e}")
+        args = context.args or []
+        if args:
+            market = args[0].upper()
+            try:
+                success = await self._coordinator.reset_market(market)
+                if success:
+                    await update.message.reply_text(
+                        f"✅ <b>{market}</b> 킬스위치 해제 완료.",
+                        parse_mode="HTML",
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"ℹ️ {market}은 킬스위치 차단 상태가 아닙니다."
+                    )
+            except Exception as e:
+                await update.message.reply_text(f"❌ 해제 실패: {e}")
+        else:
+            try:
+                await self._coordinator.reset(confirm=True)
+                await update.message.reply_text("✅ 킬 스위치 전체 해제 완료. 매매를 재개합니다.")
+            except Exception as e:
+                await update.message.reply_text(f"❌ 해제 실패: {e}")
 
     async def cmd_strategy(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """전략 변경"""

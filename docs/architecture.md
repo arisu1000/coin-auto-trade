@@ -145,6 +145,82 @@ candle_cache.get_missing_range()
      주문 파이프라인 진입 차단
 ```
 
+킬스위치 상태는 SQLite에 영속화되어 **재시작 후에도 복원**됩니다.
+
+### 킬스위치 해제
+
+- `/resume` → 매크로·수동 킬스위치 전체 해제 (`reset(confirm=True)`)
+- `/resume KRW-BTC` → 해당 마켓의 마이크로 킬스위치만 해제 (`reset_market(market)`)
+
+---
+
+## 피라미딩 포지션 직접 손절 체크 (`_check_position_exit`)
+
+`generate_signals()`는 캔들 윈도우를 기반으로 시뮬레이션하므로, 윈도우 이전에 진입한 포지션(예: `/sync`·`/pyramid_set`으로 수동 등록)의 손절·트레일링 스탑을 감지하지 못합니다.
+
+이를 보완하기 위해 `_check_position_exit()`가 별도로 동작합니다:
+
+```
+포지션이 _pyramid_state에 있으면:
+    avg_price = 실제 평균단가 (DB에서 복원 또는 수동 설정)
+    highest   = 해당 마켓의 포지션 보유 이후 최고가
+
+    stop_threshold  = avg_price × (1 - stop_pct / 100)
+    trail_threshold = highest × (1 - trail_pct / 100)
+
+    current_price <= stop_threshold            → SELL (손절)
+    trail_threshold > avg_price
+      AND current_price <= trail_threshold     → SELL (트레일링 스탑)
+```
+
+**핵심 설계 결정:**
+- 손절·트레일링 스탑 기준을 **진입가가 아닌 평균단가(avg_price)** 로 계산합니다. 추가매수로 단가가 낮아진 경우 실제 손익과 일치시키기 위함입니다.
+- 트레일링 스탑은 `trail_threshold > avg_price`일 때만 발동합니다. 포지션이 아직 수익권에 진입하지 않은 상태에서 최고가 기준 역방향 스탑이 진입가 근처에서 조기 청산하는 문제를 방지합니다.
+
+---
+
+## 거래지원 종료 예정 마켓 감지
+
+`_monitor_loop` 내 `_refresh_warned_markets()`가 5분마다 실행됩니다:
+
+```
+업비트 /market/all?isDetails=true 조회
+    ↓
+market_event.warning == true  OR  market_warning != "NONE"
+인 KRW 마켓 수집 → new_warned set
+    ↓
+newly_warned = new_warned - _warned_markets (이전 상태와 비교)
+    ↓
+신규 감지된 마켓에 대해:
+  ├─ 보유 중 → 시장가 자동 매도 + 매수 금지 등록 + 텔레그램 알림
+  └─ 미보유  → 신규 매수 차단 + 텔레그램 알림
+    ↓
+_warned_markets = new_warned (업데이트)
+```
+
+재시작 시 `_warned_markets`를 조용히 선로딩하여 **이미 알린 마켓을 다시 알림하지 않습니다.**
+
+---
+
+## 매수 금지 마켓 (`_excluded_markets`)
+
+두 가지 경로로 설정됩니다:
+
+| 경로 | 범위 | 영속성 |
+|------|------|--------|
+| `.env` `EXCLUDED_MARKETS=KRW-SHIB,...` | 시작부터 정적 제외 | 재시작마다 적용 |
+| 텔레그램 `/block [마켓]` | 런타임 동적 추가 | SQLite `excluded_markets` 테이블에 저장 |
+
+`_strategy_loop`에서 BUY 결정 직전에 `_excluded_markets` 포함 여부와 `_warned_markets` 포함 여부를 모두 확인합니다.
+
+---
+
+## 매도 후 재진입 쿨다운 (`sell_cooldown`)
+
+매도 체결 시 SQLite `sell_cooldown` 테이블에 매도 시각을 기록합니다.
+이후 `PYRAMID_SELL_COOLDOWN_MINUTES`(기본 1440분) 이내에 동일 마켓의 신규 BUY 신호가 오면 진입을 건너뜁니다.
+새로운 매수가 체결되면 쿨다운 레코드를 삭제합니다.
+
 ---
 
 ## 핫 리로딩 메커니즘
@@ -174,6 +250,10 @@ ABC 검증: generate_signals + validate_params 구현 확인
 | `portfolio_history` | 시간별 자산 스냅샷 | recorded_at |
 | `bot_logs` | 시스템 로그 (레벨별) | created_at, level |
 | `agent_checkpoints` | LangGraph 상태 영속화 | thread_id (PK) |
+| `kill_switch_state` | 킬스위치 상태 영속화 (재시작 복원용) | id (PK) |
+| `pyramid_state` | 피라미딩 포지션 상태 (진입가·추가매수 횟수) | market (PK) |
+| `sell_cooldown` | 매도 후 재진입 대기 기록 | market (PK) |
+| `excluded_markets` | 매수 금지 마켓 목록 (사유 포함) | market (PK) |
 
 **PRAGMA 설정:**
 - `journal_mode=WAL`: 읽기/쓰기 동시 허용

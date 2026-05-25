@@ -12,7 +12,7 @@
 | **제로 다운타임** | importlib 핫 리로딩으로 서버 재시작 없이 전략 교체 |
 | **이중 킬 스위치** | 매크로(포트폴리오)/마이크로(개별 코인) 자동 손절 |
 | **ARM64 네이티브** | Apple Silicon Mac에서 TA-Lib 소스 컴파일, 에뮬레이션 없음 |
-| **텔레그램 원격 제어** | `/halt`, `/panic_sell`, `/strategy` 등 실시간 제어 |
+| **텔레그램 원격 제어** | `/halt`, `/resume [마켓]`, `/sell`, `/block`, `/panic_sell` 등 실시간 제어 |
 | **SQLite 영속성** | ACID 보장, 재부팅 후에도 에이전트 맥락 복원 |
 | **완전한 테스트 커버리지** | Mock 기반 테스트, 실제 API 호출 없음 |
 
@@ -106,6 +106,13 @@ Kill Switch 확인 (낙폭/손절 체크)
 - [x] 텔레그램 봇 원격 제어
 - [x] SQLite 영속성 레이어
 - [x] pytest 테스트 스위트
+- [x] 피라미딩 전략 (pyramid_breakout / pyramid_breakout_ls)
+- [x] 매수 금지 마켓 관리 (텔레그램 /block + EXCLUDED_MARKETS 환경변수)
+- [x] 보유 종목 선택 매도 (텔레그램 /sell)
+- [x] 거래지원 종료 예정 마켓 자동 감지 및 처리
+- [x] 매도 후 재진입 쿨다운
+- [x] 평균단가 기준 손절·트레일링 스탑
+- [x] 마켓별 킬스위치 개별 해제 (/resume [마켓])
 - [ ] 공포/탐욕 지수 연동 (Fear & Greed API)
 - [ ] 다중 코인 포트폴리오 리밸런싱
 - [ ] Prometheus + Grafana 메트릭 대시보드
