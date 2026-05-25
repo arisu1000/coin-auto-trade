@@ -55,6 +55,9 @@ class TradingBot:
         app.add_handler(CommandHandler("logs", self._auth_wrap(self._handlers.cmd_logs)))
         app.add_handler(CommandHandler("trades", self._auth_wrap(self._handlers.cmd_trades)))
         app.add_handler(CommandHandler("settings", self._auth_wrap(self._handlers.cmd_settings)))
+        app.add_handler(CommandHandler("sync", self._auth_wrap(self._handlers.cmd_sync)))
+        app.add_handler(CommandHandler("pyramid_status", self._auth_wrap(self._handlers.cmd_pyramid_status)))
+        app.add_handler(CommandHandler("pyramid_set", self._auth_wrap(self._handlers.cmd_pyramid_set)))
         app.add_handler(CommandHandler("panic_sell", self._auth_wrap(self._handlers.cmd_panic_sell)))
 
         # 인라인 버튼 콜백

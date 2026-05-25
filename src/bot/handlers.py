@@ -39,6 +39,9 @@ class CommandHandlers:
             f"/strategy [이름] - 전략 변경\n"
             f"/backtest [전략] [일수] - 백테스트 실행\n"
             f"/logs [개수] - 최근 로그 조회\n"
+            f"/sync - 업비트 잔고 기준 피라미딩 상태 동기화\n"
+            f"/pyramid_status - 피라미딩 포지션 상태 조회\n"
+            f"/pyramid_set [마켓] [진입가] [횟수] - 피라미딩 상태 수동 설정\n"
             f"/panic_sell - 긴급 전량 매도",
             parse_mode="HTML",
         )
@@ -262,6 +265,96 @@ class CommandHandlers:
             f"  슬리피지: {s.default_slippage_bps}bps ({s.default_slippage_bps/100:.2f}%)"
         )
         await update.message.reply_text(text, parse_mode="HTML")
+
+    async def cmd_sync(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """업비트 잔고 기준 피라미딩 상태 동기화"""
+        if not self._trader:
+            await update.message.reply_text("❌ 트레이더 미연결")
+            return
+        try:
+            result = await self._trader.sync_pyramid_state()
+            removed = result["removed"]
+            added = result["added"]
+
+            lines = ["🔄 <b>피라미딩 상태 동기화 완료</b>\n"]
+            if removed:
+                lines.append(f"🗑 제거 (잔고 없음): {', '.join(removed)}")
+            if added:
+                lines.append(f"➕ 추가 (평균단가 기준): {', '.join(added)}")
+            if not removed and not added:
+                lines.append("✅ 변경 없음 — 이미 동기화된 상태입니다.")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"❌ 동기화 실패: {e}")
+
+    async def cmd_pyramid_set(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """피라미딩 상태 수동 설정
+        사용법: /pyramid_set KRW-BTC 95000000 2
+        """
+        if not self._trader:
+            await update.message.reply_text("❌ 트레이더 미연결")
+            return
+        args = context.args or []
+        if len(args) != 3:
+            await update.message.reply_text(
+                "사용법: <code>/pyramid_set [마켓] [진입가] [추가매수횟수]</code>\n\n"
+                "예) <code>/pyramid_set KRW-BTC 95000000 2</code>\n"
+                "→ BTC 진입가 9,500만원, 추가매수 2회 완료로 기록",
+                parse_mode="HTML",
+            )
+            return
+        try:
+            market = args[0].upper()
+            entry_price = float(args[1].replace(",", ""))
+            add_count = int(args[2])
+            if entry_price <= 0 or add_count < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("❌ 입력값 오류: 진입가는 양수, 추가매수 횟수는 0 이상 정수")
+            return
+
+        await self._trader.set_pyramid_state(market, entry_price, add_count)
+
+        strategy = self._trader._strategy_manager.get_active() if self._trader._strategy_manager else None
+        add_pct = getattr(strategy, "add_pct", 10.0) if strategy else 10.0
+        next_level = entry_price * (1 + add_pct / 100 * (add_count + 1))
+
+        await update.message.reply_text(
+            f"✅ <b>피라미딩 상태 설정 완료</b>\n\n"
+            f"마켓: <code>{market}</code>\n"
+            f"진입가: {entry_price:,.0f}원\n"
+            f"추가매수 완료: {add_count}회\n"
+            f"다음 추가매수 기준: {next_level:,.0f}원 ({add_pct}% 상승)",
+            parse_mode="HTML",
+        )
+
+    async def cmd_pyramid_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """현재 피라미딩 상태 조회"""
+        if not self._trader:
+            await update.message.reply_text("❌ 트레이더 미연결")
+            return
+
+        state = self._trader._pyramid_state
+        if not state:
+            await update.message.reply_text("📭 현재 추적 중인 피라미딩 포지션이 없습니다.")
+            return
+
+        strategy = self._trader._strategy_manager.get_active() if self._trader._strategy_manager else None
+        add_pct = getattr(strategy, "add_pct", 10.0) if strategy else 10.0
+
+        lines = ["📊 <b>피라미딩 포지션 상태</b>\n"]
+        for market, s in state.items():
+            entry = s["entry_price"]
+            count = s["add_count"]
+            next_level = entry * (1 + add_pct / 100 * (count + 1))
+            lines.append(
+                f"<code>{market}</code>\n"
+                f"  진입가: {entry:,.0f}원\n"
+                f"  추가매수: {count}회 완료\n"
+                f"  다음 기준: {next_level:,.0f}원\n"
+            )
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
     async def cmd_panic_sell(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """긴급 전량 시장가 매도"""

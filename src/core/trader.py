@@ -401,6 +401,14 @@ class Trader:
                     if b.currency != "KRW" and b.available > 0
                 }
 
+                # 피라미딩 상태 자동 정리: 잔고 없는 종목 제거
+                stale = [m for m in list(self._pyramid_state) if m not in self._held_markets]
+                for market in stale:
+                    self._pyramid_state.pop(market, None)
+                    if self._pyramid_repo:
+                        await self._pyramid_repo.delete(market)
+                    logger.info("pyramid_state_auto_cleaned", market=market)
+
                 await repo.snapshot(
                     total_krw=krw,
                     coin_value=coin_value,
@@ -610,6 +618,50 @@ class Trader:
             self._active_orders.pop(uuid, None)
         except Exception as e:
             logger.error("order_monitor_failed", uuid=uuid, error=str(e))
+
+    async def sync_pyramid_state(self) -> dict:
+        """업비트 실제 잔고 기준으로 피라미딩 상태 동기화.
+
+        Returns:
+            {"removed": [...], "added": [...]}  변경 내역
+        """
+        balances = await self._upbit_ctx.get_balances()
+        held = {
+            f"KRW-{b.currency}": b
+            for b in balances
+            if b.currency != "KRW" and b.available > 0
+        }
+        removed, added = [], []
+
+        # 잔고 없는데 state 있으면 제거
+        for market in list(self._pyramid_state):
+            if market not in held:
+                self._pyramid_state.pop(market)
+                if self._pyramid_repo:
+                    await self._pyramid_repo.delete(market)
+                removed.append(market)
+
+        # 잔고 있는데 state 없으면 avg_buy_price로 초기화
+        for market, bal in held.items():
+            if market not in self._pyramid_state and bal.avg_buy_price > 0:
+                self._pyramid_state[market] = {
+                    "entry_price": bal.avg_buy_price,
+                    "add_count": 0,
+                }
+                if self._pyramid_repo:
+                    await self._pyramid_repo.save(market, bal.avg_buy_price, 0)
+                added.append(f"{market}@{bal.avg_buy_price:,.0f}")
+
+        logger.info("pyramid_state_synced", removed=removed, added=added)
+        return {"removed": removed, "added": added}
+
+    async def set_pyramid_state(self, market: str, entry_price: float, add_count: int) -> None:
+        """피라미딩 상태 수동 설정 (/pyramid_set 명령)"""
+        self._pyramid_state[market] = {"entry_price": entry_price, "add_count": add_count}
+        if self._pyramid_repo:
+            await self._pyramid_repo.save(market, entry_price, add_count)
+        logger.info("pyramid_state_manual_set", market=market,
+                    entry_price=entry_price, add_count=add_count)
 
     def _pyramid_add_allowed(self, market: str, current_price: float, strategy) -> bool:
         """피라미딩 BUY가 실행 가능한 레벨인지 확인 (중복 실행 방지)
