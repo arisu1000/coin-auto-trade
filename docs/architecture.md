@@ -242,6 +242,65 @@ ABC 검증: generate_signals + validate_params 구현 확인
 
 ---
 
+## 부분 익절 (`_check_partial_take` / `_execute_partial_sell`)
+
+```
+매 전략 루프 틱마다 포지션 보유 시:
+
+    PYRAMID_PARTIAL_TAKE_PCT > 0 이고 partial_taken == False이면:
+        target = entry_price × (1 + PYRAMID_PARTIAL_TAKE_PCT / 100)
+        current_price >= target
+            → _execute_partial_sell(): 보유량 × PYRAMID_PARTIAL_SELL_RATIO 시장가 매도
+            → pyramid_state.partial_taken = True (DB 저장)
+            → 텔레그램 부분 익절 알림
+        나머지 포지션은 트레일링 스탑으로 계속 운영
+```
+
+**핵심 설계 결정:**
+- `partial_taken` 플래그를 `pyramid_state` 테이블에 영속화하여 재시작 후 이중 발동을 방지합니다.
+- 신규 진입(`set_pyramid_state`, `sync_pyramid_state`) 시 플래그를 항상 `False`로 초기화합니다.
+- 부분 익절 후에도 `_pyramid_state`는 유지되어 손절·트레일 스탑은 계속 동작합니다.
+
+---
+
+## 일일 성과 리포트 (`_report_loop`)
+
+`asyncio.gather()`에 포함된 별도 코루틴으로 KST 기준 날짜가 바뀔 때 자동 발송합니다.
+
+```
+매 60초 체크:
+    now_kst.date() != last_report_date
+        → _send_daily_report()
+        → last_report_date = today_kst
+
+리포트 내용:
+    최근 30일 성과 (승률, 누적 손익, MDD)
+    현재 자산 (총액, 원화, 코인 평가액)
+    보유 포지션별 미실현 손익 (업비트 실시간 조회)
+```
+
+최초 기동 시에는 `last_report_date`를 즉시 세팅하되 발송하지 않아 시작 직후 중복 발송을 방지합니다.
+
+---
+
+## 설정값 핫 리로드 (`reload_settings`)
+
+`/reload_settings` 텔레그램 명령으로 실행합니다.
+
+```
+Settings() 새 인스턴스 생성 (.env 재파싱, lru_cache 우회)
+    ↓
+전략 파라미터 변경 시 → StrategyManager.activate() 재실행
+킬스위치 임계치 변경 시 → coordinator._macro_threshold / _micro_threshold 갱신
+기타 수치 (매매 주기, 캔들, 부분 익절 등) → self._settings 교체
+    ↓
+핸들러의 self._settings 레퍼런스 동기화 (cmd_reload_settings에서 처리)
+```
+
+**반영 안 되는 항목** (재시작 필요): API 키, 텔레그램 토큰, DB 경로, 거래 모드, 로그 레벨
+
+---
+
 ## SQLite 테이블 설계
 
 | 테이블 | 목적 | 인덱스 |
@@ -251,7 +310,7 @@ ABC 검증: generate_signals + validate_params 구현 확인
 | `bot_logs` | 시스템 로그 (레벨별) | created_at, level |
 | `agent_checkpoints` | LangGraph 상태 영속화 | thread_id (PK) |
 | `kill_switch_state` | 킬스위치 상태 영속화 (재시작 복원용) | id (PK) |
-| `pyramid_state` | 피라미딩 포지션 상태 (진입가·추가매수 횟수) | market (PK) |
+| `pyramid_state` | 피라미딩 포지션 상태 (진입가·추가매수 횟수·부분익절여부) | market (PK) |
 | `sell_cooldown` | 매도 후 재진입 대기 기록 | market (PK) |
 | `excluded_markets` | 매수 금지 마켓 목록 (사유 포함) | market (PK) |
 
