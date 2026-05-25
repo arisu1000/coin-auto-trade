@@ -32,8 +32,9 @@ class Settings(BaseSettings):
     target_markets_top_n: int = 0   # 0이면 TARGET_MARKETS 사용, N이면 24h 거래대금 상위 N개 자동 선택
     default_strategy: str = "momentum"
     trade_interval_seconds: int = 60
-    candle_unit_minutes: int = 1   # 캔들 단위(분): 1, 3, 5, 10, 15, 30, 60, 240 / 0=일봉
-    candle_count: int = 100        # 가져올 캔들 수 (최대 200)
+    candle_unit_minutes: int = 1         # 진입 탐색용 캔들 단위(분): 0=일봉, 1, 3, 5, 10, 15, 30, 60, 240
+    candle_unit_position_minutes: int = 1  # 포지션 보유 중 캔들 단위(분): 0=일봉, 1, 3, 5, 10, 15, 30, 60, 240
+    candle_count: int = 100              # 가져올 캔들 수 (최대 200)
     trading_mode: str = "paper"   # paper | live
 
     # ─── 리스크 관리 ───
@@ -70,11 +71,13 @@ class Settings(BaseSettings):
             raise ValueError("trading_mode은 'paper' 또는 'live'여야 합니다")
         return v
 
-    @field_validator("candle_unit_minutes")
+    _VALID_CANDLE_UNITS = (0, 1, 3, 5, 10, 15, 30, 60, 240)
+
+    @field_validator("candle_unit_minutes", "candle_unit_position_minutes")
     @classmethod
     def validate_candle_unit(cls, v: int) -> int:
         if v not in (0, 1, 3, 5, 10, 15, 30, 60, 240):
-            raise ValueError("candle_unit_minutes는 0(일봉), 1, 3, 5, 10, 15, 30, 60, 240 중 하나여야 합니다")
+            raise ValueError("캔들 단위는 0(일봉), 1, 3, 5, 10, 15, 30, 60, 240 중 하나여야 합니다")
         return v
 
     @field_validator("candle_count")

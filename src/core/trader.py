@@ -251,21 +251,28 @@ class Trader:
 
     # ── 시장 데이터 루프 ─────────────────────────────────────────────
 
+    async def _fetch_candles(self, market: str):
+        """포지션 보유 여부에 따라 적절한 캔들 단위로 조회"""
+        in_position = market in self._held_markets
+        unit = (
+            self._settings.candle_unit_position_minutes
+            if in_position
+            else self._settings.candle_unit_minutes
+        )
+        if unit == 0:
+            return await self._upbit_ctx.get_candles_days(
+                market, count=self._settings.candle_count
+            )
+        return await self._upbit_ctx.get_candles_minutes(
+            market, unit=unit, count=self._settings.candle_count
+        )
+
     async def _market_loop(self) -> None:
         """캔들 데이터 갱신 루프 (매 interval마다)"""
         while self._running:
             try:
                 for market in self._active_markets:
-                    if self._settings.candle_unit_minutes == 0:
-                        candles = await self._upbit_ctx.get_candles_days(
-                            market, count=self._settings.candle_count
-                        )
-                    else:
-                        candles = await self._upbit_ctx.get_candles_minutes(
-                            market,
-                            unit=self._settings.candle_unit_minutes,
-                            count=self._settings.candle_count,
-                        )
+                    candles = await self._fetch_candles(market)
                     if candles:
                         df = self._candles_to_df(candles)
                         df = self._compute_indicators(df)
