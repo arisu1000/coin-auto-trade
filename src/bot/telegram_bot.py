@@ -54,6 +54,7 @@ class TradingBot:
         app.add_handler(CommandHandler("backtest", self._auth_wrap(self._handlers.cmd_backtest)))
         app.add_handler(CommandHandler("logs", self._auth_wrap(self._handlers.cmd_logs)))
         app.add_handler(CommandHandler("trades", self._auth_wrap(self._handlers.cmd_trades)))
+        app.add_handler(CommandHandler("settings", self._auth_wrap(self._handlers.cmd_settings)))
         app.add_handler(CommandHandler("panic_sell", self._auth_wrap(self._handlers.cmd_panic_sell)))
 
         # 인라인 버튼 콜백
@@ -90,9 +91,14 @@ class TradingBot:
     async def stop(self) -> None:
         """봇 정상 종료"""
         logger.info("telegram_bot_stopping")
-        await self._app.updater.stop()
-        await self._app.stop()
-        await self._app.shutdown()
+        try:
+            if self._app.updater.running:
+                await self._app.updater.stop()
+            if self._app.running:
+                await self._app.stop()
+            await self._app.shutdown()
+        except Exception as e:
+            logger.warning("telegram_bot_stop_error", error=str(e))
 
     async def send_alert(self, message: str) -> None:
         """비동기 알림 발송 (킬스위치 이벤트 등)"""

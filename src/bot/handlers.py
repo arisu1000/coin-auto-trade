@@ -1,5 +1,6 @@
 """텔레그램 명령 핸들러"""
 import structlog
+from datetime import datetime, timezone
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
@@ -31,6 +32,7 @@ class CommandHandlers:
             f"{mode_emoji} 현재 모드: <b>{mode_text}</b>\n\n"
             f"사용 가능한 명령어:\n"
             f"/status - 현재 상태 조회\n"
+            f"/settings - 현재 설정값 조회\n"
             f"/trades [개수] - 매매 기록 조회 (기본 10건)\n"
             f"/halt - 매매 중단 (킬스위치)\n"
             f"/resume - 매매 재개\n"
@@ -41,44 +43,45 @@ class CommandHandlers:
             parse_mode="HTML",
         )
 
+    async def _build_status_text(self) -> tuple[str, InlineKeyboardMarkup]:
+        """상태 텍스트와 키보드 생성 (cmd_status, refresh_status 공유)"""
+        ks_status = self._coordinator.status if self._coordinator else {}
+        halted_text = "🔴 중단됨" if ks_status.get("is_halted") else "🟢 운영 중"
+
+        strategy_name = (
+            self._strategy_manager.active_strategy_name
+            if self._strategy_manager else "없음"
+        )
+
+        portfolio_text = "데이터 없음"
+        if self._db:
+            from src.persistence.repositories.portfolio import PortfolioRepository
+            repo = PortfolioRepository(self._db)
+            curve = await repo.get_equity_curve(hours=1)
+            if curve:
+                latest = curve[-1]
+                equity = latest.get("equity", 0)
+                portfolio_text = f"{equity:,.0f}원"
+
+        now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        text = (
+            f"📊 <b>시스템 상태</b>\n\n"
+            f"매매 상태: {halted_text}\n"
+            f"현재 전략: <code>{strategy_name or '없음'}</code>\n"
+            f"총 자산: {portfolio_text}\n"
+            f"운영 모드: {'모의' if self._settings.is_paper else '실거래'}\n\n"
+            f"차단된 마켓: {', '.join(ks_status.get('blocked_markets', [])) or '없음'}\n\n"
+            f"<i>갱신: {now}</i>"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 새로고침", callback_data="refresh_status")],
+        ])
+        return text, keyboard
+
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """현재 상태 요약 보고"""
         try:
-            # 킬 스위치 상태
-            ks_status = self._coordinator.status if self._coordinator else {}
-            halted_text = "🔴 중단됨" if ks_status.get("is_halted") else "🟢 운영 중"
-
-            # 전략 정보
-            strategy_name = (
-                self._strategy_manager.active_strategy_name
-                if self._strategy_manager else "없음"
-            )
-
-            # 포트폴리오 (DB에서)
-            portfolio_text = "데이터 없음"
-            if self._db:
-                from src.persistence.repositories.portfolio import PortfolioRepository
-                repo = PortfolioRepository(self._db)
-                curve = await repo.get_equity_curve(hours=1)
-                if curve:
-                    latest = curve[-1]
-                    equity = latest.get("equity", 0)
-                    portfolio_text = f"{equity:,.0f}원"
-
-            text = (
-                f"📊 <b>시스템 상태</b>\n\n"
-                f"매매 상태: {halted_text}\n"
-                f"현재 전략: <code>{strategy_manager_name}</code>\n"
-                f"총 자산: {portfolio_text}\n"
-                f"운영 모드: {'모의' if self._settings.is_paper else '실거래'}\n\n"
-                f"차단된 마켓: {', '.join(ks_status.get('blocked_markets', [])) or '없음'}"
-            )
-            # 변수명 수정
-            text = text.replace("strategy_manager_name", strategy_name or "없음")
-
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 새로고침", callback_data="refresh_status")],
-            ])
+            text, keyboard = await self._build_status_text()
             await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
             await update.message.reply_text(f"❌ 상태 조회 실패: {e}")
@@ -231,6 +234,33 @@ class CommandHandlers:
 
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
+    async def cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """현재 설정값 조회"""
+        s = self._settings
+        markets = ", ".join(s.markets_list) if s.target_markets_top_n == 0 else f"거래대금 상위 {s.target_markets_top_n}개 자동선택"
+        mode_emoji = "📄" if s.is_paper else "💰"
+
+        text = (
+            f"⚙️ <b>현재 설정</b>\n\n"
+            f"<b>매매</b>\n"
+            f"  모드: {mode_emoji} {'모의 매매' if s.is_paper else '실거래'}\n"
+            f"  전략: <code>{s.default_strategy}</code>\n"
+            f"  대상 마켓: {markets}\n"
+            f"  매매 주기: {s.trade_interval_seconds}초\n\n"
+            f"<b>리스크 관리</b>\n"
+            f"  최대 낙폭 (매크로 킬스위치): {s.macro_max_drawdown_pct}%\n"
+            f"  손절 (마이크로 킬스위치): {s.micro_stop_loss_pct}%\n"
+            f"  단일 코인 최대 비중: {s.max_position_pct}%\n\n"
+            f"<b>피라미딩 전략</b>\n"
+            f"  1회 투입 금액: {s.pyramid_unit_amount:,.0f}원\n\n"
+            f"<b>알림</b>\n"
+            f"  원화 잔고 경고 기준: {s.min_krw_alert:,.0f}원\n\n"
+            f"<b>수수료/슬리피지</b>\n"
+            f"  수수료: {s.default_fee_bps}bps ({s.default_fee_bps/100:.2f}%)\n"
+            f"  슬리피지: {s.default_slippage_bps}bps ({s.default_slippage_bps/100:.2f}%)"
+        )
+        await update.message.reply_text(text, parse_mode="HTML")
+
     async def cmd_panic_sell(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """긴급 전량 시장가 매도"""
         keyboard = InlineKeyboardMarkup([
@@ -270,8 +300,11 @@ class CommandHandlers:
                 await query.edit_message_text("❌ 트레이더 미연결")
 
         elif data == "refresh_status":
-            await query.edit_message_text("🔄 상태 갱신 중...")
-            await self.cmd_status(update, context)
+            try:
+                text, keyboard = await self._build_status_text()
+                await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+            except Exception as e:
+                await query.edit_message_text(f"❌ 상태 조회 실패: {e}")
 
         elif data == "cancel":
             await query.edit_message_text("취소되었습니다.")
