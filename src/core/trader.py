@@ -62,6 +62,8 @@ class Trader:
         self._running = False
         self._low_krw_alerted = False  # 잔고 부족 알림 중복 방지
         self._trade_repo: TradeRepository | None = None
+        self._dynamic_markets: list[str] = []   # top_n 모드에서 사용
+        self._market_refresh_ticks = 0           # 갱신 주기 카운터 (5분 × 12 = 1시간)
 
     async def run(self) -> None:
         """메인 실행 진입점"""
@@ -139,6 +141,10 @@ class Trader:
             )
         )
 
+        # top_n 모드: 거래량 상위 N개 마켓 초기 로드
+        if self._settings.target_markets_top_n > 0:
+            self._dynamic_markets = await self._fetch_top_markets()
+
         # 시작 시 현재 보유 코인 파악 (TARGET_MARKETS 외 보유분도 즉시 감시 시작)
         try:
             balances = await self._upbit_ctx.get_balances()
@@ -157,19 +163,65 @@ class Trader:
     @property
     def _active_markets(self) -> list[str]:
         """
-        TARGET_MARKETS + 현재 보유 중인 코인 마켓의 합집합.
+        기준 마켓 + 현재 보유 중인 코인 마켓의 합집합.
 
-        보유 코인은 TARGET_MARKETS에 없더라도 캔들 수집과 신호 생성 대상에 포함된다.
-        단, 매수(BUY) 실행은 TARGET_MARKETS에 있는 코인만 허용한다.
+        top_n 모드: _dynamic_markets (거래량 상위 N개)
+        기본 모드:  TARGET_MARKETS (설정값)
+
+        보유 코인은 기준 마켓에 없더라도 캔들 수집과 신호 생성 대상에 포함된다.
+        단, 매수(BUY) 실행은 기준 마켓에 있는 코인만 허용한다.
         """
-        combined = set(self._settings.markets_list) | self._held_markets
-        return sorted(combined)
+        base = (
+            set(self._dynamic_markets)
+            if self._settings.target_markets_top_n > 0
+            else set(self._settings.markets_list)
+        )
+        return sorted(base | self._held_markets)
 
     def _pyramid_params(self, strategy_name: str) -> dict | None:
         """피라미딩 전략에만 unit_amount 설정값을 주입한다."""
         if "pyramid" in strategy_name:
             return {"unit_amount": self._settings.pyramid_unit_amount}
         return None
+
+    async def _fetch_top_markets(self) -> list[str]:
+        """업비트 KRW 마켓 중 24h 거래대금 상위 N개를 반환한다."""
+        top_n = self._settings.target_markets_top_n
+        all_markets = await self._upbit_ctx.get_markets(krw_only=True)
+        market_codes = [m["market"] for m in all_markets]
+
+        # 100개씩 나눠서 티커 조회 (URL 길이 제한 대비)
+        tickers: list[dict] = []
+        for i in range(0, len(market_codes), 100):
+            chunk = market_codes[i:i + 100]
+            tickers.extend(await self._upbit_ctx.get_ticker(chunk))
+            await asyncio.sleep(0.1)
+
+        tickers.sort(key=lambda t: float(t.get("acc_trade_price_24h") or 0), reverse=True)
+        return [t["market"] for t in tickers[:top_n]]
+
+    async def _refresh_top_markets(self) -> None:
+        """top_n 마켓 목록을 갱신하고 변경 사항을 텔레그램으로 알린다."""
+        try:
+            new_markets = await self._fetch_top_markets()
+            prev = set(self._dynamic_markets)
+            curr = set(new_markets)
+
+            added = sorted(curr - prev)
+            removed = sorted(prev - curr)
+
+            self._dynamic_markets = new_markets
+            logger.info("top_markets_refreshed", markets=new_markets)
+
+            if self._bot and (added or removed):
+                lines = [f"🔄 <b>거래 마켓 목록 갱신</b> (상위 {self._settings.target_markets_top_n}개)\n"]
+                if added:
+                    lines.append(f"➕ 추가: {', '.join(added)}")
+                if removed:
+                    lines.append(f"➖ 제거: {', '.join(removed)}")
+                await self._bot.send_alert("\n".join(lines))
+        except Exception as e:
+            logger.error("top_markets_refresh_failed", error=str(e))
 
     async def _check_low_krw(self, krw: float) -> None:
         """원화 잔고가 임계치 이하일 때 텔레그램 경고를 발송한다. 잔고 회복 시 플래그를 초기화한다."""
@@ -228,7 +280,11 @@ class Trader:
 
         while self._running:
             try:
-                target_set = set(self._settings.markets_list)
+                target_set = (
+                    set(self._dynamic_markets)
+                    if self._settings.target_markets_top_n > 0
+                    else set(self._settings.markets_list)
+                )
                 for market in self._active_markets:
                     if self._coordinator.is_market_blocked(market):
                         continue
@@ -307,6 +363,13 @@ class Trader:
 
                 # 원화 잔고 부족 경고
                 await self._check_low_krw(krw)
+
+                # top_n 모드: 1시간마다 마켓 목록 갱신
+                if self._settings.target_markets_top_n > 0:
+                    self._market_refresh_ticks += 1
+                    if self._market_refresh_ticks >= 12:
+                        await self._refresh_top_markets()
+                        self._market_refresh_ticks = 0
 
                 await asyncio.sleep(300)  # 5분
             except asyncio.CancelledError:

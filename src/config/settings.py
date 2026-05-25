@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     # ─── 매매 설정 ───
     target_markets: str = "KRW-BTC,KRW-ETH,KRW-SOL"
+    target_markets_top_n: int = 0   # 0이면 TARGET_MARKETS 사용, N이면 24h 거래대금 상위 N개 자동 선택
     default_strategy: str = "momentum"
     trade_interval_seconds: int = 60
     trading_mode: str = "paper"   # paper | live
