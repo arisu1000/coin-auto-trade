@@ -190,9 +190,16 @@ class Trader:
         return sorted(base | self._held_markets)
 
     def _pyramid_params(self, strategy_name: str) -> dict | None:
-        """피라미딩 전략에만 unit_amount 설정값을 주입한다."""
+        """피라미딩 전략 파라미터를 설정값에서 주입한다."""
         if "pyramid" in strategy_name:
-            return {"unit_amount": self._settings.pyramid_unit_amount}
+            s = self._settings
+            return {
+                "unit_amount": s.pyramid_unit_amount,
+                "entry_pct":   s.pyramid_entry_pct,
+                "add_pct":     s.pyramid_add_pct,
+                "stop_pct":    s.pyramid_stop_pct,
+                "trail_pct":   s.pyramid_trail_pct,
+            }
         return None
 
     async def _fetch_top_markets(self) -> list[str]:

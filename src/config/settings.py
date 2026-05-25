@@ -43,7 +43,11 @@ class Settings(BaseSettings):
     max_position_pct: float = 30.0
 
     # ─── 피라미딩 전략 ───
-    pyramid_unit_amount: float = 100_000.0   # pyramid_breakout / pyramid_breakout_ls 1회 투입 금액(원)
+    pyramid_unit_amount: float = 100_000.0   # 1회 투입 금액(원)
+    pyramid_entry_pct: float = 10.0          # 저점 대비 진입 상승률 (%)
+    pyramid_add_pct: float = 10.0            # 진입가 대비 추가매수 간격 (%)
+    pyramid_stop_pct: float = 10.0           # 진입가 대비 손절 하락률 (%)
+    pyramid_trail_pct: float = 10.0          # 최고가 대비 트레일링 스탑 하락률 (%)
 
     # ─── 잔고 경고 ───
     min_krw_alert: float = 10_000.0          # 원화 잔고가 이 금액 이하일 때 텔레그램 경고 발송
