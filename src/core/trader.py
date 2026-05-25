@@ -195,6 +195,14 @@ class Trader:
         except Exception as e:
             logger.warning("held_markets_fetch_failed", error=str(e))
 
+        # 거래지원 종료 예정 마켓 초기 로드 (알림 없이) — 재시작 시 중복 알림 방지
+        try:
+            self._warned_markets = await self._upbit_ctx.get_warned_markets()
+            if self._warned_markets:
+                logger.info("warned_markets_preloaded", markets=sorted(self._warned_markets))
+        except Exception as e:
+            logger.warning("warned_markets_preload_failed", error=str(e))
+
         logger.info("trader_initialized")
 
     @property
