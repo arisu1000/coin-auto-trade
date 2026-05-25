@@ -44,6 +44,12 @@ class CommandHandlers:
             f"<b>피라미딩 동기화</b>\n"
             f"/sync - 업비트 잔고 기준 상태 동기화\n"
             f"/pyramid_set [마켓] [진입가] [횟수] - 상태 수동 설정\n\n"
+            f"<b>매수 제외</b>\n"
+            f"/block [마켓] [사유] - 특정 종목 매수 금지\n"
+            f"/unblock [마켓] - 매수 금지 해제\n"
+            f"/blocked - 매수 금지 목록 조회\n\n"
+            f"<b>수동 매도</b>\n"
+            f"/sell [마켓] - 특정 종목 즉시 시장가 매도 (생략 시 목록 표시)\n\n"
             f"<b>긴급</b>\n"
             f"/panic_sell - 전량 시장가 매도"
         )
@@ -251,12 +257,14 @@ class CommandHandlers:
         markets = ", ".join(s.markets_list) if s.target_markets_top_n == 0 else f"거래대금 상위 {s.target_markets_top_n}개 자동선택"
         mode_emoji = "📄" if s.is_paper else "💰"
 
+        excluded_static = ", ".join(s.excluded_markets_list) or "없음"
         text = (
             f"⚙️ <b>현재 설정</b>\n\n"
             f"<b>매매</b>\n"
             f"  모드: {mode_emoji} {'모의 매매' if s.is_paper else '실거래'}\n"
             f"  전략: <code>{s.default_strategy}</code>\n"
             f"  대상 마켓: {markets}\n"
+            f"  매수 제외(설정): {excluded_static}\n"
             f"  매매 주기: {s.trade_interval_seconds}초\n"
             f"  캔들(진입): {'일봉' if s.candle_unit_minutes == 0 else f'{s.candle_unit_minutes}분봉'} × {s.candle_count}개\n"
             f"  캔들(보유중): {'일봉' if s.candle_unit_position_minutes == 0 else f'{s.candle_unit_position_minutes}분봉'} × {s.candle_count}개\n\n"
@@ -369,6 +377,94 @@ class CommandHandlers:
             )
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
+    async def cmd_block(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """특정 마켓 매수 금지 등록. 사용법: /block KRW-BTC [사유]"""
+        if not self._trader:
+            await update.message.reply_text("❌ 트레이더 미연결")
+            return
+        args = context.args or []
+        if not args:
+            await update.message.reply_text(
+                "사용법: <code>/block [마켓] [사유(선택)]</code>\n"
+                "예) <code>/block KRW-BTC 고점 판단</code>",
+                parse_mode="HTML",
+            )
+            return
+        market = args[0].upper()
+        reason = " ".join(args[1:]) if len(args) > 1 else ""
+        await self._trader.block_market(market, reason)
+        await update.message.reply_text(
+            f"🚫 <b>{market}</b> 매수 금지 등록 완료\n"
+            + (f"사유: {reason}" if reason else "사유: 없음"),
+            parse_mode="HTML",
+        )
+
+    async def cmd_unblock(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """매수 금지 해제. 사용법: /unblock KRW-BTC"""
+        if not self._trader:
+            await update.message.reply_text("❌ 트레이더 미연결")
+            return
+        args = context.args or []
+        if not args:
+            await update.message.reply_text(
+                "사용법: <code>/unblock [마켓]</code>\n"
+                "예) <code>/unblock KRW-BTC</code>",
+                parse_mode="HTML",
+            )
+            return
+        market = args[0].upper()
+        removed = await self._trader.unblock_market(market)
+        if removed:
+            await update.message.reply_text(f"✅ <b>{market}</b> 매수 금지 해제 완료", parse_mode="HTML")
+        else:
+            await update.message.reply_text(f"ℹ️ {market}은 매수 금지 목록에 없습니다.")
+
+    async def cmd_blocked(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """현재 매수 금지 목록 조회"""
+        if not self._trader:
+            await update.message.reply_text("❌ 트레이더 미연결")
+            return
+        excluded = self._trader._excluded_markets
+        if not excluded:
+            await update.message.reply_text("📭 매수 금지된 마켓이 없습니다.")
+            return
+        lines = ["🚫 <b>매수 금지 목록</b>\n"]
+        for market, reason in sorted(excluded.items()):
+            lines.append(f"• <code>{market}</code>" + (f" — {reason}" if reason else ""))
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    async def cmd_sell(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """보유 종목 선택 매도. /sell 또는 /sell KRW-BTC"""
+        if not self._trader:
+            await update.message.reply_text("❌ 트레이더 미연결")
+            return
+        args = context.args or []
+        if args:
+            market = args[0].upper()
+            if market not in self._trader._held_markets:
+                await update.message.reply_text(f"❌ <code>{market}</code> 보유 중이지 않습니다.", parse_mode="HTML")
+                return
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ 매도 실행", callback_data=f"sell_confirm:{market}"),
+                InlineKeyboardButton("❌ 취소", callback_data="cancel"),
+            ]])
+            await update.message.reply_text(
+                f"🔴 <b>{market} 매도 확인</b>\n\n시장가로 전량 매도하시겠습니까?",
+                parse_mode="HTML", reply_markup=keyboard,
+            )
+        else:
+            held = sorted(self._trader._held_markets)
+            if not held:
+                await update.message.reply_text("📭 현재 보유 중인 종목이 없습니다.")
+                return
+            buttons = [[InlineKeyboardButton(m, callback_data=f"sell_pick:{m}")] for m in held]
+            buttons.append([InlineKeyboardButton("❌ 취소", callback_data="cancel")])
+            await update.message.reply_text(
+                "📊 <b>매도할 종목을 선택하세요</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+
     async def cmd_panic_sell(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """긴급 전량 시장가 매도"""
         keyboard = InlineKeyboardMarkup([
@@ -413,6 +509,31 @@ class CommandHandlers:
                 await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
             except Exception as e:
                 await query.edit_message_text(f"❌ 상태 조회 실패: {e}")
+
+        elif data.startswith("sell_pick:"):
+            market = data.split(":", 1)[1]
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ 매도 실행", callback_data=f"sell_confirm:{market}"),
+                InlineKeyboardButton("❌ 취소", callback_data="cancel"),
+            ]])
+            await query.edit_message_text(
+                f"🔴 <b>{market} 매도 확인</b>\n\n시장가로 전량 매도하시겠습니까?",
+                parse_mode="HTML", reply_markup=keyboard,
+            )
+
+        elif data.startswith("sell_confirm:"):
+            market = data.split(":", 1)[1]
+            if self._trader:
+                try:
+                    success = await self._trader.sell_market(market)
+                    if success:
+                        await query.edit_message_text(f"✅ <b>{market}</b> 매도 주문 전송 완료.", parse_mode="HTML")
+                    else:
+                        await query.edit_message_text(f"❌ {market} 보유 잔고가 없습니다.")
+                except Exception as e:
+                    await query.edit_message_text(f"❌ 매도 실패: {e}")
+            else:
+                await query.edit_message_text("❌ 트레이더 미연결")
 
         elif data == "cancel":
             await query.edit_message_text("취소되었습니다.")

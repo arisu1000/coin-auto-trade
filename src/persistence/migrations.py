@@ -97,6 +97,17 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         )
         """,
     ),
+    (
+        5,
+        "excluded_markets",
+        """
+        CREATE TABLE IF NOT EXISTS excluded_markets (
+            market     TEXT NOT NULL PRIMARY KEY,
+            reason     TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        )
+        """,
+    ),
 ]
 
 

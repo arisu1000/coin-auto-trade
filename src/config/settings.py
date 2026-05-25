@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     pyramid_trail_pct: float = 10.0          # 최고가 대비 트레일링 스탑 하락률 (%)
     pyramid_sell_cooldown_minutes: int = 1440  # 매도 후 재진입 대기 시간 (분, 기본 24시간)
 
+    # ─── 매수 제외 마켓 ───
+    excluded_markets: str = ""               # 매수를 하지 않을 마켓 목록 (쉼표 구분, e.g. KRW-BTC,KRW-ETH)
+
     # ─── 잔고 경고 ───
     min_krw_alert: float = 10_000.0          # 원화 잔고가 이 금액 이하일 때 텔레그램 경고 발송
 
@@ -95,6 +98,10 @@ class Settings(BaseSettings):
     @property
     def markets_list(self) -> list[str]:
         return [m.strip() for m in self.target_markets.split(",")]
+
+    @property
+    def excluded_markets_list(self) -> list[str]:
+        return [m.strip().upper() for m in self.excluded_markets.split(",") if m.strip()]
 
     @property
     def is_paper(self) -> bool:

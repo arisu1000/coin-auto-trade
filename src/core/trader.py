@@ -72,6 +72,9 @@ class Trader:
         self._pyramid_repo = None  # PyramidStateRepository (초기화 후 설정)
         # 거래지원 종료 예정(투자유의) 마켓: BUY 차단 + 포지션 자동 청산
         self._warned_markets: set[str] = set()
+        # 매수 제외 마켓: {market: reason} (설정값 + 텔레그램 동적 추가)
+        self._excluded_markets: dict[str, str] = {}
+        self._excluded_repo = None
 
     async def run(self) -> None:
         """메인 실행 진입점"""
@@ -109,6 +112,18 @@ class Trader:
 
         # 매매 기록
         self._trade_repo = TradeRepository(self._db)
+
+        # 매수 제외 마켓 복원
+        from src.persistence.repositories.excluded_markets import ExcludedMarketsRepository
+        self._excluded_repo = ExcludedMarketsRepository(self._db)
+        # 설정값 기반 정적 제외
+        for m in self._settings.excluded_markets_list:
+            self._excluded_markets[m] = "설정값"
+        # DB 기반 동적 제외 (텔레그램 등록)
+        db_excluded = await self._excluded_repo.load_all()
+        self._excluded_markets.update(db_excluded)
+        if self._excluded_markets:
+            logger.info("excluded_markets_restored", markets=list(self._excluded_markets))
 
         # 피라미딩 상태 복원
         from src.persistence.repositories.pyramid_state import PyramidStateRepository
@@ -399,6 +414,12 @@ class Trader:
                         decision = agent_result.get("judge_decision", "HOLD")
                         confidence = agent_result.get("judge_confidence", 0.0)
                         override_amount = None
+
+                    # 매수 제외 마켓 차단
+                    if decision == "BUY" and market in self._excluded_markets:
+                        logger.info("buy_blocked_excluded", market=market,
+                                    reason=self._excluded_markets[market])
+                        decision = "HOLD"
 
                     # 거래지원 종료 예정 마켓 매수 차단
                     if decision == "BUY" and market in self._warned_markets:
@@ -764,6 +785,33 @@ class Trader:
                 add_count=add_count,
             )
         return allowed
+
+    async def block_market(self, market: str, reason: str = "") -> None:
+        """특정 마켓 매수 제외 등록 (/block 명령)"""
+        self._excluded_markets[market] = reason
+        if self._excluded_repo:
+            await self._excluded_repo.add(market, reason)
+        logger.info("market_buy_blocked", market=market, reason=reason)
+
+    async def unblock_market(self, market: str) -> bool:
+        """매수 제외 해제 (/unblock 명령). 설정값 기반은 재시작 전까지 유지됨."""
+        if market not in self._excluded_markets:
+            return False
+        self._excluded_markets.pop(market, None)
+        if self._excluded_repo:
+            await self._excluded_repo.remove(market)
+        logger.info("market_buy_unblocked", market=market)
+        return True
+
+    async def sell_market(self, market: str) -> bool:
+        """특정 마켓 즉시 시장가 매도 (/sell 명령). 보유 중이 아니면 False."""
+        if market not in self._held_markets:
+            return False
+        await self._execute_decision(
+            market, "SELL", 0.0,
+            {"judge_reasoning": "텔레그램 수동 매도", "judge_confidence": 1.0},
+        )
+        return True
 
     async def panic_sell(self) -> None:
         """긴급 전량 시장가 매도 (/panic_sell 명령)"""
