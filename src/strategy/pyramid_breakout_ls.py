@@ -100,7 +100,9 @@ class PyramidBreakoutLSStrategy(Strategy):
         in_short = False
 
         long_entry_price = long_highest = 0.0
+        long_avg_price = long_buy_cost = long_buy_vol = 0.0
         short_entry_price = short_lowest = 0.0
+        short_avg_price = short_buy_cost = short_buy_vol = 0.0
         long_add_count = 0
         short_add_count = 0
 
@@ -120,6 +122,9 @@ class PyramidBreakoutLSStrategy(Strategy):
                     signals.iloc[i] = TradingSignal.BUY
                     in_long = True
                     long_entry_price = long_highest = c
+                    long_buy_cost = self.unit_amount
+                    long_buy_vol = self.unit_amount / c
+                    long_avg_price = c
                     long_add_count = 0
                     candidate_high = c
 
@@ -127,6 +132,9 @@ class PyramidBreakoutLSStrategy(Strategy):
                     signals.iloc[i] = _SHORT
                     in_short = True
                     short_entry_price = short_lowest = c
+                    short_buy_cost = self.unit_amount
+                    short_buy_vol = self.unit_amount / c
+                    short_avg_price = c
                     short_add_count = 0
                     candidate_low = c
 
@@ -134,38 +142,52 @@ class PyramidBreakoutLSStrategy(Strategy):
                 if c > long_highest:
                     long_highest = c
 
-                if c <= long_entry_price * stop_long:
+                # 손절: 평균단가 기준
+                if c <= long_avg_price * stop_long:
                     signals.iloc[i] = TradingSignal.SELL
                     in_long = False
+                    long_buy_cost = long_buy_vol = long_avg_price = 0.0
                     candidate_low = candidate_high = c
 
-                elif long_highest * trail_long > long_entry_price and c <= long_highest * trail_long:
+                # 트레일링 스탑: 평균단가 초과할 때만 발동
+                elif long_highest * trail_long > long_avg_price and c <= long_highest * trail_long:
                     signals.iloc[i] = TradingSignal.SELL
                     in_long = False
+                    long_buy_cost = long_buy_vol = long_avg_price = 0.0
                     candidate_low = candidate_high = c
 
                 # 피라미딩: 첫 진입가 기준 선형 단계
                 elif c >= long_entry_price * (1 + self.add_pct / 100 * (long_add_count + 1)):
                     signals.iloc[i] = TradingSignal.BUY
+                    long_buy_cost += self.unit_amount
+                    long_buy_vol += self.unit_amount / c
+                    long_avg_price = long_buy_cost / long_buy_vol
                     long_add_count += 1
 
             else:  # in_short
                 if c < short_lowest:
                     short_lowest = c
 
-                if c >= short_entry_price * stop_short:
+                # 손절: 평균단가 기준
+                if c >= short_avg_price * stop_short:
                     signals.iloc[i] = _COVER
                     in_short = False
+                    short_buy_cost = short_buy_vol = short_avg_price = 0.0
                     candidate_low = candidate_high = c
 
-                elif short_lowest * trail_short < short_entry_price and c >= short_lowest * trail_short:
+                # 트레일링 스탑: 평균단가 미만일 때만 발동
+                elif short_lowest * trail_short < short_avg_price and c >= short_lowest * trail_short:
                     signals.iloc[i] = _COVER
                     in_short = False
+                    short_buy_cost = short_buy_vol = short_avg_price = 0.0
                     candidate_low = candidate_high = c
 
                 # 피라미딩: 첫 진입가 기준 선형 단계
                 elif c <= short_entry_price * (1 - self.add_pct / 100 * (short_add_count + 1)):
                     signals.iloc[i] = _SHORT
+                    short_buy_cost += self.unit_amount
+                    short_buy_vol += self.unit_amount / c
+                    short_avg_price = short_buy_cost / short_buy_vol
                     short_add_count += 1
 
         return signals

@@ -10,11 +10,12 @@
 예) entry=100, add_pct=10% → 110, 120, 130, ... (항상 진입가 기준 선형 단계)
 
 ─── 손절 ────────────────────────────────────────────────────────────────────
-  close <= 첫 진입가 × (1 − stop_pct%)  →  전량 매도 (SELL)
+  close <= 평균단가 × (1 − stop_pct%)  →  전량 매도 (SELL)
+  (추가 매수로 평균단가가 올라갈수록 손절선도 함께 상향)
 
 ─── 익절 (트레일링 스탑) ────────────────────────────────────────────────────
   close <= 최고가 × (1 − trail_pct%)  →  전량 매도 (SELL)  (최고가는 매 봉 갱신)
-  단, 트레일 임계값 > 진입가일 때만 발동 — 수익 구간에서만 작동, 손절은 stop_pct 담당
+  단, 트레일 임계값 > 평균단가일 때만 발동 — 수익 구간에서만 작동, 손절은 stop_pct 담당
 
 ─── 투입 금액 ───────────────────────────────────────────────────────────────
 unit_amount: 매수 1회당 투입 금액(원). 첫 진입과 피라미딩 모두 동일.
@@ -83,7 +84,10 @@ class PyramidBreakoutStrategy(Strategy):
         signals = pd.Series(TradingSignal.HOLD, index=df.index, dtype=int)
 
         in_position = False
-        entry_price = 0.0       # 첫 진입가 (손절·피라미딩 기준)
+        entry_price = 0.0       # 첫 진입가 (피라미딩 레벨 기준)
+        avg_price = 0.0         # 평균단가 (손절·트레일 기준)
+        buy_cost = 0.0          # 누적 투입 금액
+        buy_vol = 0.0           # 누적 매수 수량
         highest_price = 0.0     # 진입 이후 최고가 (트레일링 스탑 기준)
         candidate_low = close[0]  # 포지션 없을 때 추적하는 직전 저점
         add_count = 0           # 누적 추가 매수 횟수
@@ -101,6 +105,9 @@ class PyramidBreakoutStrategy(Strategy):
                     signals.iloc[i] = TradingSignal.BUY
                     in_position = True
                     entry_price = c
+                    buy_cost = self.unit_amount
+                    buy_vol = self.unit_amount / c
+                    avg_price = c
                     highest_price = c
                     add_count = 0
                 else:
@@ -113,23 +120,28 @@ class PyramidBreakoutStrategy(Strategy):
                 if c > highest_price:
                     highest_price = c
 
-                # ── 손절: 첫 진입가 기준 ─────────────────────────────────
-                if c <= entry_price * stop_mult:
+                # ── 손절: 평균단가 기준 ───────────────────────────────────
+                if c <= avg_price * stop_mult:
                     signals.iloc[i] = TradingSignal.SELL
                     in_position = False
+                    buy_cost = buy_vol = avg_price = 0.0
                     candidate_low = c
 
                 # ── 익절: 최고가 기준 트레일링 스탑 ─────────────────────
-                # 트레일 임계값이 진입가를 초과할 때만 발동 (수익 구간에서만 작동)
-                elif highest_price * trail_mult > entry_price and c <= highest_price * trail_mult:
+                # 트레일 임계값이 평균단가를 초과할 때만 발동 (수익 구간에서만 작동)
+                elif highest_price * trail_mult > avg_price and c <= highest_price * trail_mult:
                     signals.iloc[i] = TradingSignal.SELL
                     in_position = False
+                    buy_cost = buy_vol = avg_price = 0.0
                     candidate_low = c
 
                 # ── 피라미딩: 첫 진입가 기준 선형 단계 ──────────────────
                 # 다음 추가 매수 레벨 = entry × (1 + add_pct × (add_count + 1))
                 elif c >= entry_price * (1 + self.add_pct / 100 * (add_count + 1)):
                     signals.iloc[i] = TradingSignal.BUY
+                    buy_cost += self.unit_amount
+                    buy_vol += self.unit_amount / c
+                    avg_price = buy_cost / buy_vol
                     add_count += 1
 
         return signals
@@ -157,6 +169,9 @@ class PyramidBreakoutStrategy(Strategy):
         stop_mult = 1 - self.stop_pct / 100
         trail_mult = 1 - self.trail_pct / 100
         entry_price = 0.0
+        avg_price = 0.0
+        buy_cost = 0.0
+        buy_vol = 0.0
         highest_price = 0.0
         add_count = 0
 
@@ -169,6 +184,9 @@ class PyramidBreakoutStrategy(Strategy):
                     if c >= candidate_low * entry_mult:
                         in_position = True
                         entry_price = c
+                        buy_cost = self.unit_amount
+                        buy_vol = self.unit_amount / c
+                        avg_price = c
                         highest_price = c
                         add_count = 0
                     elif c < candidate_low:
@@ -176,12 +194,16 @@ class PyramidBreakoutStrategy(Strategy):
             else:
                 if c > highest_price:
                     highest_price = c
-                if c <= entry_price * stop_mult or (
-                    highest_price * trail_mult > entry_price and c <= highest_price * trail_mult
+                if c <= avg_price * stop_mult or (
+                    highest_price * trail_mult > avg_price and c <= highest_price * trail_mult
                 ):
                     in_position = False
+                    buy_cost = buy_vol = avg_price = 0.0
                     candidate_low = c
                 elif c >= entry_price * (1 + self.add_pct / 100 * (add_count + 1)):
+                    buy_cost += self.unit_amount
+                    buy_vol += self.unit_amount / c
+                    avg_price = buy_cost / buy_vol
                     add_count += 1
 
         result["candidate_low"] = cand_low_arr
