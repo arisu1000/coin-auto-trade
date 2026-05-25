@@ -353,17 +353,28 @@ class Trader:
                 self._active_orders[order.uuid] = order
                 logger.info("order_placed", uuid=order.uuid, market=market, side="bid")
 
+                if self._bot:
+                    asyncio.create_task(self._bot.send_alert(
+                        f"🟢 <b>매수 체결</b>\n\n"
+                        f"마켓: <code>{market}</code>\n"
+                        f"투입 금액: {invest_amount:,.0f}원\n"
+                        f"현재가: {current_price:,.0f}원\n"
+                        f"확신도: {agent_result.get('judge_confidence', 0):.0%}\n"
+                        f"근거: {agent_result.get('judge_reasoning', '')}"
+                    ))
+
                 # 체결 확인 타임아웃 (15초)
                 asyncio.create_task(self._monitor_order(order.uuid, ttl=15))
 
             elif decision == "SELL" and coin_balance and coin_balance.available > 0:
                 # 마이크로 킬스위치 확인
+                sell_price = 0.0
                 if coin_balance.avg_buy_price > 0:
                     ticker = await self._upbit_ctx.get_ticker([market])
                     if ticker:
-                        current_price = float(ticker[0]["trade_price"])
+                        sell_price = float(ticker[0]["trade_price"])
                         await self._coordinator.check_micro(
-                            market, coin_balance.avg_buy_price, current_price
+                            market, coin_balance.avg_buy_price, sell_price
                         )
 
                 order = await self._upbit_ctx.place_order(
@@ -374,6 +385,23 @@ class Trader:
                 )
                 self._active_orders[order.uuid] = order
                 logger.info("order_placed", uuid=order.uuid, market=market, side="ask")
+
+                if self._bot:
+                    avg_price = coin_balance.avg_buy_price
+                    pnl_pct = (
+                        (sell_price - avg_price) / avg_price * 100
+                        if avg_price > 0 and sell_price > 0 else 0.0
+                    )
+                    pnl_emoji = "📈" if pnl_pct >= 0 else "📉"
+                    asyncio.create_task(self._bot.send_alert(
+                        f"🔴 <b>매도 체결</b>\n\n"
+                        f"마켓: <code>{market}</code>\n"
+                        f"수량: {coin_balance.available:.6f}\n"
+                        f"현재가: {sell_price:,.0f}원\n"
+                        f"평균 단가: {avg_price:,.0f}원\n"
+                        f"{pnl_emoji} 손익: {pnl_pct:+.2f}%\n"
+                        f"근거: {agent_result.get('judge_reasoning', '')}"
+                    ))
 
         except Exception as e:
             logger.error("order_execution_failed", market=market, error=str(e))
