@@ -119,14 +119,21 @@ class UpbitClient:
     async def get_warned_markets(self) -> set[str]:
         """투자유의(거래지원 종료 예정 포함) KRW 마켓 코드 집합 반환.
 
-        /market/all?isDetails=true 의 market_warning 필드가 NONE이 아니면 경고 마켓으로 간주한다.
+        isDetails=true 응답은 market_event.warning 을 사용한다.
+        market_warning 필드(구형 응답)도 함께 체크해 호환성을 유지한다.
         """
         data = await self._get("/market/all", params={"isDetails": "true"}, use_exchange_bucket=False)
-        return {
-            m["market"]
-            for m in data
-            if m["market"].startswith("KRW-") and m.get("market_warning", "NONE") != "NONE"
-        }
+        warned = set()
+        for m in data:
+            if not m["market"].startswith("KRW-"):
+                continue
+            has_warning = (
+                m.get("market_event", {}).get("warning", False)
+                or m.get("market_warning", "NONE") != "NONE"
+            )
+            if has_warning:
+                warned.add(m["market"])
+        return warned
 
     # ─── Authenticated Exchange API ────────────────────────────────────
 
