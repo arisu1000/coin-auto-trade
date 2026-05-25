@@ -61,6 +61,7 @@ class Trader:
         self._held_markets: set[str] = set()  # 현재 보유 중인 코인의 마켓 코드
         self._running = False
         self._low_krw_alerted = False  # 잔고 부족 알림 중복 방지
+        self._trade_repo: TradeRepository | None = None
 
     async def run(self) -> None:
         """메인 실행 진입점"""
@@ -95,6 +96,9 @@ class Trader:
         # 업비트 클라이언트
         self._upbit = UpbitClient(self._settings)
         self._upbit_ctx = await self._upbit.__aenter__()
+
+        # 매매 기록
+        self._trade_repo = TradeRepository(self._db)
 
         # 킬 스위치
         self._coordinator = KillSwitchCoordinator(
@@ -372,6 +376,21 @@ class Trader:
                 self._active_orders[order.uuid] = order
                 logger.info("order_placed", uuid=order.uuid, market=market, side="bid")
 
+                # 매매 기록 저장
+                if self._trade_repo:
+                    fee_rate = self._settings.default_fee_bps / 10000
+                    volume = invest_amount / current_price if current_price > 0 else 0
+                    fee = invest_amount * fee_rate
+                    await self._trade_repo.record_open(
+                        market=market,
+                        side="bid",
+                        price=current_price,
+                        volume=volume,
+                        fee=fee,
+                        strategy=self._strategy_manager.active_strategy_name,
+                        agent_thread_id=f"main_{market}",
+                    )
+
                 if self._bot:
                     asyncio.create_task(self._bot.send_alert(
                         f"🟢 <b>매수 체결</b>\n\n"
@@ -404,6 +423,20 @@ class Trader:
                 )
                 self._active_orders[order.uuid] = order
                 logger.info("order_placed", uuid=order.uuid, market=market, side="ask")
+
+                # 매매 기록 마감 (해당 마켓의 미결 포지션 전체 종료)
+                if self._trade_repo and sell_price > 0:
+                    fee_rate = self._settings.default_fee_bps / 10000
+                    open_trades = await self._trade_repo.get_open_trades(market)
+                    for trade in open_trades:
+                        trade_volume = trade["volume"]
+                        sell_fee = sell_price * trade_volume * fee_rate
+                        trade_pnl = (sell_price - trade["price"]) * trade_volume - trade["fee"] - sell_fee
+                        await self._trade_repo.record_close(
+                            trade_id=trade["id"],
+                            close_price=sell_price,
+                            pnl=trade_pnl,
+                        )
 
                 if self._bot:
                     avg_price = coin_balance.avg_buy_price
