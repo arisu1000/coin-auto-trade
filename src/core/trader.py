@@ -70,6 +70,8 @@ class Trader:
         # 매도 후 재진입 쿨다운: {market: sell_at(datetime UTC)}
         self._sell_cooldown: dict[str, datetime] = {}
         self._pyramid_repo = None  # PyramidStateRepository (초기화 후 설정)
+        # 포지션 보유 중 추적한 최고가 (직접 트레일 스탑 기준)
+        self._position_highest: dict[str, float] = {}
         # 거래지원 종료 예정(투자유의) 마켓: BUY 차단 + 포지션 자동 청산
         self._warned_markets: set[str] = set()
         # 매수 제외 마켓: {market: reason} (설정값 + 텔레그램 동적 추가)
@@ -131,6 +133,10 @@ class Trader:
         self._pyramid_state = await self._pyramid_repo.load_all()
         if self._pyramid_state:
             logger.info("pyramid_state_restored", markets=list(self._pyramid_state.keys()))
+            # 최고가를 알 수 없으므로 진입가로 초기화 — 이후 매 tick 갱신됨
+            self._position_highest = {
+                m: s["entry_price"] for m, s in self._pyramid_state.items()
+            }
         cooldowns_raw = await self._pyramid_repo.load_cooldowns()
         self._sell_cooldown = {
             m: datetime.fromisoformat(ts)
@@ -392,6 +398,8 @@ class Trader:
                     is_pyramid = strategy is not None and "pyramid" in strategy.name
 
                     if is_pyramid:
+                        current_price = float(df["close"].iloc[-1])
+
                         # 피라미딩 전략: generate_signals() 직접 호출 (LangGraph 우회)
                         signals = strategy.generate_signals(df)
                         last_signal = int(signals.iloc[-1])
@@ -400,9 +408,15 @@ class Trader:
 
                         # BUY 신호: 실제 실행 가능한 레벨인지 확인 (중복 실행 방지)
                         if decision == "BUY":
-                            current_price = float(df["close"].iloc[-1])
                             if not self._pyramid_add_allowed(market, current_price, strategy):
                                 decision = "HOLD"
+
+                        # 직접 손절/트레일 체크: 시뮬레이션이 실제 진입가를 모를 때 대비
+                        # (캔들 윈도우 밖 진입, /sync·/pyramid_set 수동 등록 케이스)
+                        if decision != "SELL" and market in self._pyramid_state:
+                            direct = self._check_position_exit(market, current_price, strategy)
+                            if direct == "SELL":
+                                decision = "SELL"
 
                         confidence = 1.0
                         override_amount = getattr(strategy, "unit_amount", None)
@@ -608,12 +622,16 @@ class Trader:
                 # 피라미딩 상태 갱신 및 DB 저장
                 if market not in self._pyramid_state:
                     self._pyramid_state[market] = {"entry_price": current_price, "add_count": 0}
+                    self._position_highest[market] = current_price  # 신규 진입
                     # 신규 진입 시 쿨다운 해제
                     self._sell_cooldown.pop(market, None)
                     if self._pyramid_repo:
                         await self._pyramid_repo.delete_cooldown(market)
                 else:
                     self._pyramid_state[market]["add_count"] += 1
+                    # 추가 매수 시 최고가 갱신 (가격이 올라서 매수했으므로)
+                    if current_price > self._position_highest.get(market, 0):
+                        self._position_highest[market] = current_price
                 if self._pyramid_repo:
                     s = self._pyramid_state[market]
                     await self._pyramid_repo.save(market, s["entry_price"], s["add_count"])
@@ -669,6 +687,7 @@ class Trader:
 
                 # 피라미딩 상태 초기화 및 DB 삭제
                 self._pyramid_state.pop(market, None)
+                self._position_highest.pop(market, None)
                 if self._pyramid_repo:
                     await self._pyramid_repo.delete(market)
 
@@ -755,6 +774,51 @@ class Trader:
             await self._pyramid_repo.save(market, entry_price, add_count)
         logger.info("pyramid_state_manual_set", market=market,
                     entry_price=entry_price, add_count=add_count)
+
+    def _check_position_exit(self, market: str, current_price: float, strategy) -> str:
+        """_pyramid_state 기준으로 손절·트레일 조건을 직접 확인한다.
+
+        시뮬레이션(generate_signals)이 캔들 윈도우 밖의 실제 진입가를 알지 못하거나
+        /sync·/pyramid_set으로 수동 등록된 포지션에도 손절이 작동하도록 한다.
+        SELL 또는 HOLD 반환.
+        """
+        state = self._pyramid_state.get(market)
+        if state is None:
+            return "HOLD"
+
+        entry_price = state["entry_price"]
+        stop_pct = getattr(strategy, "stop_pct", 10.0)
+        trail_pct = getattr(strategy, "trail_pct", 10.0)
+
+        # 최고가 갱신
+        prev_highest = self._position_highest.get(market, entry_price)
+        highest = max(prev_highest, current_price)
+        self._position_highest[market] = highest
+
+        stop_threshold = entry_price * (1 - stop_pct / 100)
+        trail_threshold = highest * (1 - trail_pct / 100)
+
+        if current_price <= stop_threshold:
+            logger.info(
+                "direct_stop_loss_triggered",
+                market=market,
+                current=round(current_price),
+                entry=round(entry_price),
+                threshold=round(stop_threshold),
+            )
+            return "SELL"
+
+        if trail_threshold > entry_price and current_price <= trail_threshold:
+            logger.info(
+                "direct_trail_stop_triggered",
+                market=market,
+                current=round(current_price),
+                highest=round(highest),
+                threshold=round(trail_threshold),
+            )
+            return "SELL"
+
+        return "HOLD"
 
     def _pyramid_add_allowed(self, market: str, current_price: float, strategy) -> bool:
         """피라미딩 BUY가 실행 가능한 레벨인지 확인 (중복 실행 방지)
