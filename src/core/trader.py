@@ -60,6 +60,7 @@ class Trader:
         self._active_orders: dict = {}  # uuid → Order
         self._held_markets: set[str] = set()  # 현재 보유 중인 코인의 마켓 코드
         self._running = False
+        self._low_krw_alerted = False  # 잔고 부족 알림 중복 방지
 
     async def run(self) -> None:
         """메인 실행 진입점"""
@@ -165,6 +166,21 @@ class Trader:
         if "pyramid" in strategy_name:
             return {"unit_amount": self._settings.pyramid_unit_amount}
         return None
+
+    async def _check_low_krw(self, krw: float) -> None:
+        """원화 잔고가 임계치 이하일 때 텔레그램 경고를 발송한다. 잔고 회복 시 플래그를 초기화한다."""
+        threshold = self._settings.min_krw_alert
+        if krw <= threshold:
+            if not self._low_krw_alerted and self._bot:
+                await self._bot.send_alert(
+                    f"⚠️ <b>원화 잔고 부족 경고</b>\n\n"
+                    f"현재 잔고: {krw:,.0f}원\n"
+                    f"경고 기준: {threshold:,.0f}원 이하\n\n"
+                    f"매수 주문이 실행되지 않을 수 있습니다."
+                )
+                self._low_krw_alerted = True
+        else:
+            self._low_krw_alerted = False
 
     async def _shutdown(self) -> None:
         """정상 종료"""
@@ -284,6 +300,9 @@ class Trader:
 
                 # 매크로 킬스위치 체크
                 await self._coordinator.check_macro(total_equity)
+
+                # 원화 잔고 부족 경고
+                await self._check_low_krw(krw)
 
                 await asyncio.sleep(300)  # 5분
             except asyncio.CancelledError:

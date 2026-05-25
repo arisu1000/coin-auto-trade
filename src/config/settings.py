@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # ─── 피라미딩 전략 ───
     pyramid_unit_amount: float = 100_000.0   # pyramid_breakout / pyramid_breakout_ls 1회 투입 금액(원)
 
+    # ─── 잔고 경고 ───
+    min_krw_alert: float = 10_000.0          # 원화 잔고가 이 금액 이하일 때 텔레그램 경고 발송
+
     # ─── 백테스트 ───
     default_fee_bps: int = 5
     default_slippage_bps: int = 3
