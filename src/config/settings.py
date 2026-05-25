@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     target_markets_top_n: int = 0   # 0이면 TARGET_MARKETS 사용, N이면 24h 거래대금 상위 N개 자동 선택
     default_strategy: str = "momentum"
     trade_interval_seconds: int = 60
+    candle_unit_minutes: int = 1   # 캔들 단위: 1, 3, 5, 10, 15, 30, 60, 240
+    candle_count: int = 100        # 가져올 캔들 수 (최대 200)
     trading_mode: str = "paper"   # paper | live
 
     # ─── 리스크 관리 ───
@@ -66,6 +68,20 @@ class Settings(BaseSettings):
     def validate_mode(cls, v: str) -> str:
         if v not in ("paper", "live"):
             raise ValueError("trading_mode은 'paper' 또는 'live'여야 합니다")
+        return v
+
+    @field_validator("candle_unit_minutes")
+    @classmethod
+    def validate_candle_unit(cls, v: int) -> int:
+        if v not in (1, 3, 5, 10, 15, 30, 60, 240):
+            raise ValueError("candle_unit_minutes는 1, 3, 5, 10, 15, 30, 60, 240 중 하나여야 합니다")
+        return v
+
+    @field_validator("candle_count")
+    @classmethod
+    def validate_candle_count(cls, v: int) -> int:
+        if not (1 <= v <= 200):
+            raise ValueError("candle_count는 1 이상 200 이하여야 합니다")
         return v
 
     @property

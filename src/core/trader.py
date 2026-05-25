@@ -257,7 +257,9 @@ class Trader:
             try:
                 for market in self._active_markets:
                     candles = await self._upbit_ctx.get_candles_minutes(
-                        market, unit=1, count=100
+                        market,
+                        unit=self._settings.candle_unit_minutes,
+                        count=self._settings.candle_count,
                     )
                     if candles:
                         df = self._candles_to_df(candles)
