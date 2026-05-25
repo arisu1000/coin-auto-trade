@@ -64,6 +64,9 @@ class Trader:
         self._trade_repo: TradeRepository | None = None
         self._dynamic_markets: list[str] = []   # top_n 모드에서 사용
         self._market_refresh_ticks = 0           # 갱신 주기 카운터 (5분 × 12 = 1시간)
+        # 피라미딩 실행 상태: 매번 재시뮬레이션으로 인한 중복 매수 방지
+        # {market: {"entry_price": float, "add_count": int}}
+        self._pyramid_state: dict[str, dict] = {}
 
     async def run(self) -> None:
         """메인 실행 진입점"""
@@ -317,6 +320,13 @@ class Trader:
                         last_signal = int(signals.iloc[-1])
                         # -2(SHORT), +2(COVER)는 업비트 현물에서 불가 → HOLD 처리
                         decision = {1: "BUY", -1: "SELL"}.get(last_signal, "HOLD")
+
+                        # BUY 신호: 실제 실행 가능한 레벨인지 확인 (중복 실행 방지)
+                        if decision == "BUY":
+                            current_price = float(df["close"].iloc[-1])
+                            if not self._pyramid_add_allowed(market, current_price, strategy):
+                                decision = "HOLD"
+
                         confidence = 1.0
                         override_amount = getattr(strategy, "unit_amount", None)
                         agent_result = {
@@ -496,9 +506,17 @@ class Trader:
                         agent_thread_id=f"main_{market}",
                     )
 
+                # 피라미딩 상태 갱신
+                if market not in self._pyramid_state:
+                    self._pyramid_state[market] = {"entry_price": current_price, "add_count": 0}
+                else:
+                    self._pyramid_state[market]["add_count"] += 1
+
                 if self._bot:
+                    state = self._pyramid_state[market]
+                    add_info = f"추가매수 #{state['add_count']}" if state["add_count"] > 0 else "최초 진입"
                     asyncio.create_task(self._bot.send_alert(
-                        f"🟢 <b>매수 체결</b>\n\n"
+                        f"🟢 <b>매수 체결</b> ({add_info})\n\n"
                         f"마켓: <code>{market}</code>\n"
                         f"투입 금액: {invest_amount:,.0f}원\n"
                         f"현재가: {current_price:,.0f}원\n"
@@ -543,6 +561,9 @@ class Trader:
                             pnl=trade_pnl,
                         )
 
+                # 피라미딩 상태 초기화
+                self._pyramid_state.pop(market, None)
+
                 if self._bot:
                     avg_price = coin_balance.avg_buy_price
                     pnl_pct = (
@@ -576,6 +597,31 @@ class Trader:
             self._active_orders.pop(uuid, None)
         except Exception as e:
             logger.error("order_monitor_failed", uuid=uuid, error=str(e))
+
+    def _pyramid_add_allowed(self, market: str, current_price: float, strategy) -> bool:
+        """피라미딩 BUY가 실행 가능한 레벨인지 확인 (중복 실행 방지)
+
+        - 포지션 없음: 최초 진입 허용
+        - 포지션 있음: 다음 레벨(entry × (1 + add_pct × (add_count+1))) 초과 시만 허용
+        """
+        state = self._pyramid_state.get(market)
+        if state is None:
+            return market not in self._held_markets
+
+        add_pct = getattr(strategy, "add_pct", 10.0)
+        entry_price = state["entry_price"]
+        add_count = state["add_count"]
+        next_threshold = entry_price * (1 + add_pct / 100 * (add_count + 1))
+        allowed = current_price >= next_threshold
+        if not allowed:
+            logger.debug(
+                "pyramid_add_skipped",
+                market=market,
+                current=current_price,
+                next_threshold=next_threshold,
+                add_count=add_count,
+            )
+        return allowed
 
     async def panic_sell(self) -> None:
         """긴급 전량 시장가 매도 (/panic_sell 명령)"""
