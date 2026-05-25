@@ -11,10 +11,11 @@ WORKDIR /tmp/ta-lib-build
 
 # TA-Lib 0.4.0 소스 — 네트워크 의존성 제거를 위해 레포에 포함된 파일을 직접 사용
 COPY docker/ta-lib-0.4.0-src.tar.gz .
+# make -j 병렬 빌드 시 .deps 디렉토리 race condition 발생 → 단일 스레드로 컴파일
 RUN tar -xzf ta-lib-0.4.0-src.tar.gz \
     && cd ta-lib \
     && ./configure --prefix=/usr --build=aarch64-unknown-linux-gnu \
-    && make -j$(nproc) \
+    && make \
     && make install
 
 # Python 의존성 wheel 빌드 (네이티브 C 라이브러리 사용)
