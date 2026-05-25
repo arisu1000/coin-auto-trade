@@ -13,8 +13,8 @@
   close <= 첫 진입가 × (1 − stop_pct%)  →  전량 매도 (SELL)
 
 ─── 익절 (트레일링 스탑) ────────────────────────────────────────────────────
-  close <= 최고가 × (1 − trail_pct%)  →  전량 매도 (SELL)
-  (최고가는 매 봉 갱신)
+  close <= 최고가 × (1 − trail_pct%)  →  전량 매도 (SELL)  (최고가는 매 봉 갱신)
+  단, 트레일 임계값 > 진입가일 때만 발동 — 수익 구간에서만 작동, 손절은 stop_pct 담당
 
 ─── 투입 금액 ───────────────────────────────────────────────────────────────
 unit_amount: 매수 1회당 투입 금액(원). 첫 진입과 피라미딩 모두 동일.
@@ -120,7 +120,8 @@ class PyramidBreakoutStrategy(Strategy):
                     candidate_low = c
 
                 # ── 익절: 최고가 기준 트레일링 스탑 ─────────────────────
-                elif c <= highest_price * trail_mult:
+                # 트레일 임계값이 진입가를 초과할 때만 발동 (수익 구간에서만 작동)
+                elif highest_price * trail_mult > entry_price and c <= highest_price * trail_mult:
                     signals.iloc[i] = TradingSignal.SELL
                     in_position = False
                     candidate_low = c
@@ -175,7 +176,9 @@ class PyramidBreakoutStrategy(Strategy):
             else:
                 if c > highest_price:
                     highest_price = c
-                if c <= entry_price * stop_mult or c <= highest_price * trail_mult:
+                if c <= entry_price * stop_mult or (
+                    highest_price * trail_mult > entry_price and c <= highest_price * trail_mult
+                ):
                     in_position = False
                     candidate_low = c
                 elif c >= entry_price * (1 + self.add_pct / 100 * (add_count + 1)):

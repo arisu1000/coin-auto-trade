@@ -139,7 +139,7 @@ class PyramidBreakoutLSStrategy(Strategy):
                     in_long = False
                     candidate_low = candidate_high = c
 
-                elif c <= long_highest * trail_long:
+                elif long_highest * trail_long > long_entry_price and c <= long_highest * trail_long:
                     signals.iloc[i] = TradingSignal.SELL
                     in_long = False
                     candidate_low = candidate_high = c
@@ -158,7 +158,7 @@ class PyramidBreakoutLSStrategy(Strategy):
                     in_short = False
                     candidate_low = candidate_high = c
 
-                elif c >= short_lowest * trail_short:
+                elif short_lowest * trail_short < short_entry_price and c >= short_lowest * trail_short:
                     signals.iloc[i] = _COVER
                     in_short = False
                     candidate_low = candidate_high = c
