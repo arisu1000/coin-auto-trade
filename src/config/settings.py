@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     micro_stop_loss_pct: float = 3.0
     max_position_pct: float = 30.0
 
+    # ─── 피라미딩 전략 ───
+    pyramid_unit_amount: float = 100_000.0   # pyramid_breakout / pyramid_breakout_ls 1회 투입 금액(원)
+
     # ─── 백테스트 ───
     default_fee_bps: int = 5
     default_slippage_bps: int = 3

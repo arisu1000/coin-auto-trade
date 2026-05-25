@@ -127,7 +127,11 @@ class CommandHandlers:
 
         strategy_name = context.args[0]
         try:
-            self._strategy_manager.activate(strategy_name)
+            params = (
+                {"unit_amount": self._settings.pyramid_unit_amount}
+                if "pyramid" in strategy_name else None
+            )
+            self._strategy_manager.activate(strategy_name, params=params)
             await update.message.reply_text(
                 f"✅ 전략이 <code>{strategy_name}</code>으로 변경되었습니다.\n"
                 f"서버 재시작 없이 즉시 적용됩니다.",

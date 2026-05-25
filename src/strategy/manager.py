@@ -34,6 +34,7 @@ class StrategyManager:
         self._classes: dict[str, type[Strategy]] = {}
         self._mtimes: dict[str, float] = {}
         self._active_name: str | None = None
+        self._active_params: dict | None = None
 
     @property
     def active_strategy_name(self) -> str | None:
@@ -93,18 +94,19 @@ class StrategyManager:
             return strategy_class(**params)
         return strategy_class()
 
-    def activate(self, name: str) -> Strategy:
+    def activate(self, name: str, params: dict | None = None) -> Strategy:
         """전략을 로드하고 현재 활성 전략으로 설정"""
-        strategy = self.load(name)
+        strategy = self.load(name, params=params)
         self._active_name = name
-        logger.info("strategy_activated", name=name)
+        self._active_params = params
+        logger.info("strategy_activated", name=name, params=params)
         return strategy
 
     def get_active(self) -> Strategy | None:
         """현재 활성화된 전략 인스턴스 반환 (없으면 None)"""
         if self._active_name is None:
             return None
-        return self.load(self._active_name)
+        return self.load(self._active_name, params=self._active_params)
 
     def list_available(self) -> list[str]:
         """사용 가능한 전략 파일 목록"""

@@ -105,7 +105,10 @@ class Trader:
         # 전략 매니저
         strategy_dir = Path("src/strategy")
         self._strategy_manager = StrategyManager(strategy_dir)
-        self._strategy_manager.activate(self._settings.default_strategy)
+        self._strategy_manager.activate(
+            self._settings.default_strategy,
+            params=self._pyramid_params(self._settings.default_strategy),
+        )
 
         # LangGraph 워크플로우
         self._workflow = build_workflow(self._settings, db_path=self._settings.db_path)
@@ -156,6 +159,12 @@ class Trader:
         """
         combined = set(self._settings.markets_list) | self._held_markets
         return sorted(combined)
+
+    def _pyramid_params(self, strategy_name: str) -> dict | None:
+        """피라미딩 전략에만 unit_amount 설정값을 주입한다."""
+        if "pyramid" in strategy_name:
+            return {"unit_amount": self._settings.pyramid_unit_amount}
+        return None
 
     async def _shutdown(self) -> None:
         """정상 종료"""
