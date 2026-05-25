@@ -53,6 +53,7 @@ class TradingBot:
         app.add_handler(CommandHandler("strategy", self._auth_wrap(self._handlers.cmd_strategy)))
         app.add_handler(CommandHandler("backtest", self._auth_wrap(self._handlers.cmd_backtest)))
         app.add_handler(CommandHandler("logs", self._auth_wrap(self._handlers.cmd_logs)))
+        app.add_handler(CommandHandler("trades", self._auth_wrap(self._handlers.cmd_trades)))
         app.add_handler(CommandHandler("panic_sell", self._auth_wrap(self._handlers.cmd_panic_sell)))
 
         # 인라인 버튼 콜백

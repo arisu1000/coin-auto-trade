@@ -31,6 +31,7 @@ class CommandHandlers:
             f"{mode_emoji} 현재 모드: <b>{mode_text}</b>\n\n"
             f"사용 가능한 명령어:\n"
             f"/status - 현재 상태 조회\n"
+            f"/trades [개수] - 매매 기록 조회 (기본 10건)\n"
             f"/halt - 매매 중단 (킬스위치)\n"
             f"/resume - 매매 재개\n"
             f"/strategy [이름] - 전략 변경\n"
@@ -177,6 +178,55 @@ class CommandHandlers:
             )
             lines.append(
                 f"{level_emoji} [{log.get('level','')}] {log.get('message', '')[:80]}"
+            )
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    async def cmd_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """최근 매매 기록 조회"""
+        limit = int(context.args[0]) if context.args else 10
+        if not self._db:
+            await update.message.reply_text("❌ 데이터베이스 미연결")
+            return
+
+        from src.persistence.repositories.trades import TradeRepository
+        repo = TradeRepository(self._db)
+        trades = await repo.get_recent(limit=limit)
+        summary = await repo.get_performance_summary(days=30)
+
+        if not trades:
+            await update.message.reply_text("📭 매매 기록이 없습니다.")
+            return
+
+        # 성과 요약
+        total = summary.get("total_trades", 0)
+        wins = summary.get("wins", 0)
+        total_pnl = summary.get("total_pnl") or 0.0
+        win_rate = wins / total * 100 if total > 0 else 0.0
+        pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+
+        lines = [
+            f"📊 <b>매매 기록 (최근 {limit}건)</b>\n",
+            f"─ 30일 성과 ─",
+            f"총 거래: {total}건 | 승률: {win_rate:.1f}%",
+            f"{pnl_emoji} 누적 손익: {total_pnl:+,.0f}원\n",
+            f"─ 최근 거래 ─",
+        ]
+
+        for t in trades:
+            status = t.get("status", "")
+            if status == "open":
+                status_mark = "🔵 보유중"
+            elif t.get("pnl") is not None and t["pnl"] >= 0:
+                status_mark = "📈 익절"
+            else:
+                status_mark = "📉 손절" if status == "closed" else "⚪"
+
+            pnl_text = f"{t['pnl']:+,.0f}원" if t.get("pnl") is not None else "-"
+            side_text = "매수" if t.get("side") == "bid" else "매도"
+            lines.append(
+                f"{status_mark} {t['market']} {side_text} | "
+                f"{t['price']:,.0f}원 | PnL: {pnl_text}"
             )
 
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
