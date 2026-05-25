@@ -293,35 +293,51 @@ class Trader:
                     if df is None or len(df) < 50:
                         continue
 
-                    snapshot = self._build_snapshot(market, df)
-                    state = self._build_initial_state(snapshot)
-
-                    # LangGraph 워크플로우 실행
-                    result = await self._workflow.ainvoke(
-                        state,
-                        config={"configurable": {"thread_id": f"main_{market}"}},
-                    )
-
-                    decision = result.get("judge_decision", "HOLD")
-                    confidence = result.get("judge_confidence", 0.0)
-                    position_size_pct = result.get("position_size_pct", 0.0)
-
-                    # TARGET_MARKETS 밖 보유 코인은 매수 불가, 매도만 허용
                     allow_buy = market in target_set
+                    strategy = self._strategy_manager.get_active()
+                    is_pyramid = strategy is not None and "pyramid" in strategy.name
+
+                    if is_pyramid:
+                        # 피라미딩 전략: generate_signals() 직접 호출 (LangGraph 우회)
+                        signals = strategy.generate_signals(df)
+                        last_signal = int(signals.iloc[-1])
+                        # -2(SHORT), +2(COVER)는 업비트 현물에서 불가 → HOLD 처리
+                        decision = {1: "BUY", -1: "SELL"}.get(last_signal, "HOLD")
+                        confidence = 1.0
+                        override_amount = getattr(strategy, "unit_amount", None)
+                        agent_result = {
+                            "judge_reasoning": f"{strategy.name} 전략 시그널",
+                            "judge_confidence": confidence,
+                            "position_size_pct": 0.0,
+                        }
+                    else:
+                        # AI 에이전트 워크플로우 실행
+                        snapshot = self._build_snapshot(market, df)
+                        state = self._build_initial_state(snapshot)
+                        agent_result = await self._workflow.ainvoke(
+                            state,
+                            config={"configurable": {"thread_id": f"main_{market}"}},
+                        )
+                        decision = agent_result.get("judge_decision", "HOLD")
+                        confidence = agent_result.get("judge_confidence", 0.0)
+                        override_amount = None
 
                     logger.info(
-                        "agent_decision",
+                        "strategy_decision",
                         market=market,
+                        strategy=strategy.name if strategy else "none",
                         decision=decision,
                         confidence=confidence,
-                        position_size_pct=position_size_pct,
                         allow_buy=allow_buy,
                     )
 
                     if decision != "HOLD" and confidence > 0.6:
                         await self._execute_decision(
-                            market, decision, position_size_pct, result,
+                            market, decision,
+                            agent_result.get("position_size_pct", 0.0),
+                            agent_result,
                             allow_buy=allow_buy,
+                            override_amount=override_amount,
                         )
 
                 await asyncio.sleep(self._settings.trade_interval_seconds)
@@ -387,13 +403,19 @@ class Trader:
         position_size_pct: float,
         agent_result: dict,
         allow_buy: bool = True,
+        override_amount: float | None = None,
     ) -> None:
-        """AI 결정 → 실제 주문 발주"""
+        """전략 결정 → 실제 주문 발주
+
+        override_amount: 피라미딩 전략처럼 고정 금액을 쓸 때 설정.
+                         None이면 position_size_pct × 잔고로 계산.
+        """
         if self._settings.is_paper:
             logger.info(
                 "paper_trade_simulated",
                 market=market,
                 decision=decision,
+                override_amount=override_amount,
                 position_size_pct=position_size_pct,
                 allow_buy=allow_buy,
             )
@@ -412,10 +434,16 @@ class Trader:
                 return
 
             if decision == "BUY":
-                invest_amount = krw * (position_size_pct / 100)
+                invest_amount = (
+                    override_amount
+                    if override_amount is not None
+                    else krw * (position_size_pct / 100)
+                )
                 if invest_amount < 5000:  # 업비트 최소 주문 금액
                     logger.info("order_skipped_min_amount", amount=invest_amount)
                     return
+                if invest_amount > krw:   # 잔고 초과 방지
+                    invest_amount = krw
 
                 ticker = await self._upbit_ctx.get_ticker([market])
                 current_price = float(ticker[0]["trade_price"]) if ticker else 0
