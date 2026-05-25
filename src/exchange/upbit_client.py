@@ -116,6 +116,18 @@ class UpbitClient:
         params = {"markets": ",".join(markets)}
         return await self._get("/ticker", params=params, use_exchange_bucket=False)
 
+    async def get_warned_markets(self) -> set[str]:
+        """투자유의(거래지원 종료 예정 포함) KRW 마켓 코드 집합 반환.
+
+        /market/all?isDetails=true 의 market_warning 필드가 NONE이 아니면 경고 마켓으로 간주한다.
+        """
+        data = await self._get("/market/all", params={"isDetails": "true"}, use_exchange_bucket=False)
+        return {
+            m["market"]
+            for m in data
+            if m["market"].startswith("KRW-") and m.get("market_warning", "NONE") != "NONE"
+        }
+
     # ─── Authenticated Exchange API ────────────────────────────────────
 
     async def get_balances(self) -> list[Balance]:

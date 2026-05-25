@@ -70,6 +70,8 @@ class Trader:
         # 매도 후 재진입 쿨다운: {market: sell_at(datetime UTC)}
         self._sell_cooldown: dict[str, datetime] = {}
         self._pyramid_repo = None  # PyramidStateRepository (초기화 후 설정)
+        # 거래지원 종료 예정(투자유의) 마켓: BUY 차단 + 포지션 자동 청산
+        self._warned_markets: set[str] = set()
 
     async def run(self) -> None:
         """메인 실행 진입점"""
@@ -250,6 +252,34 @@ class Trader:
         except Exception as e:
             logger.error("top_markets_refresh_failed", error=str(e))
 
+    async def _refresh_warned_markets(self) -> None:
+        """거래지원 종료 예정(투자유의) 마켓 목록을 갱신한다.
+
+        새로 경고 지정된 마켓은 BUY를 차단하고, 보유 포지션이 있으면 즉시 매도한다.
+        """
+        try:
+            new_warned = await self._upbit_ctx.get_warned_markets()
+            newly_warned = new_warned - self._warned_markets
+            for market in newly_warned:
+                logger.warning("market_warning_detected", market=market)
+                in_position = market in self._held_markets
+                if self._bot:
+                    msg = (
+                        f"⚠️ <b>거래지원 종료 예정 감지</b>\n\n"
+                        f"마켓: <code>{market}</code>\n"
+                        f"신규/추가 매수가 차단됩니다."
+                        + ("\n🔴 보유 포지션을 자동 매도합니다." if in_position else "")
+                    )
+                    asyncio.create_task(self._bot.send_alert(msg))
+                if in_position:
+                    await self._execute_decision(
+                        market, "SELL", 0.0,
+                        {"judge_reasoning": "거래지원 종료 예정 자동 매도", "judge_confidence": 1.0},
+                    )
+            self._warned_markets = new_warned
+        except Exception as e:
+            logger.error("warned_markets_check_failed", error=str(e))
+
     async def _check_low_krw(self, krw: float) -> None:
         """원화 잔고가 임계치 이하일 때 텔레그램 경고를 발송한다. 잔고 회복 시 플래그를 초기화한다."""
         threshold = self._settings.min_krw_alert
@@ -370,6 +400,11 @@ class Trader:
                         confidence = agent_result.get("judge_confidence", 0.0)
                         override_amount = None
 
+                    # 거래지원 종료 예정 마켓 매수 차단
+                    if decision == "BUY" and market in self._warned_markets:
+                        logger.info("buy_blocked_market_warning", market=market)
+                        decision = "HOLD"
+
                     logger.info(
                         "strategy_decision",
                         market=market,
@@ -424,6 +459,9 @@ class Trader:
                     if self._pyramid_repo:
                         await self._pyramid_repo.delete(market)
                     logger.info("pyramid_state_auto_cleaned", market=market)
+
+                # 거래지원 종료 예정 마켓 감시 및 자동 포지션 정리
+                await self._refresh_warned_markets()
 
                 await repo.snapshot(
                     total_krw=krw,
