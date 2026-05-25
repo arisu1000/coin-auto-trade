@@ -17,8 +17,8 @@ LSBacktestEngine(engine_ls.py)과 함께 사용해야 한다.
   close <= candidate_high × (1 − entry_pct%)  →  SHORT (−2)
 
 ─── 피라미딩 ────────────────────────────────────────────────────────────────
-  롱: 직전 매수가 대비 add_pct% 상승마다  →  BUY (1)
-  숏: 직전 숏가  대비 add_pct% 하락마다  →  SHORT (−2)
+  롱: 첫 진입가 대비 add_pct% × N 상승마다  →  BUY (1)
+  숏: 첫 진입가 대비 add_pct% × N 하락마다  →  SHORT (−2)
 
 ─── 손절 ────────────────────────────────────────────────────────────────────
   롱: close <= 첫 진입가 × (1 − stop_pct%)    →  SELL (−1)
@@ -96,14 +96,13 @@ class PyramidBreakoutLSStrategy(Strategy):
         trail_long      = 1 - self.trail_pct  / 100
         stop_short      = 1 + self.stop_pct   / 100
         trail_short     = 1 + self.trail_pct  / 100
-        add_long        = 1 + self.add_pct    / 100
-        add_short       = 1 - self.add_pct    / 100
-
         in_long  = False
         in_short = False
 
-        long_entry_price = long_last_add = long_highest = 0.0
-        short_entry_price = short_last_add = short_lowest = 0.0
+        long_entry_price = long_highest = 0.0
+        short_entry_price = short_lowest = 0.0
+        long_add_count = 0
+        short_add_count = 0
 
         candidate_low  = close[0]
         candidate_high = close[0]
@@ -120,14 +119,16 @@ class PyramidBreakoutLSStrategy(Strategy):
                 if c >= candidate_low * entry_mult:
                     signals.iloc[i] = TradingSignal.BUY
                     in_long = True
-                    long_entry_price = long_last_add = long_highest = c
-                    candidate_high = c   # 롱 진입 후 숏 추적 기준 리셋
+                    long_entry_price = long_highest = c
+                    long_add_count = 0
+                    candidate_high = c
 
                 elif c <= candidate_high * (1 - self.entry_pct / 100):
                     signals.iloc[i] = _SHORT
                     in_short = True
-                    short_entry_price = short_last_add = short_lowest = c
-                    candidate_low = c    # 숏 진입 후 롱 추적 기준 리셋
+                    short_entry_price = short_lowest = c
+                    short_add_count = 0
+                    candidate_low = c
 
             elif in_long:
                 if c > long_highest:
@@ -143,9 +144,10 @@ class PyramidBreakoutLSStrategy(Strategy):
                     in_long = False
                     candidate_low = candidate_high = c
 
-                elif c >= long_last_add * add_long:
+                # 피라미딩: 첫 진입가 기준 선형 단계
+                elif c >= long_entry_price * (1 + self.add_pct / 100 * (long_add_count + 1)):
                     signals.iloc[i] = TradingSignal.BUY
-                    long_last_add = c
+                    long_add_count += 1
 
             else:  # in_short
                 if c < short_lowest:
@@ -161,9 +163,10 @@ class PyramidBreakoutLSStrategy(Strategy):
                     in_short = False
                     candidate_low = candidate_high = c
 
-                elif c <= short_last_add * add_short:
+                # 피라미딩: 첫 진입가 기준 선형 단계
+                elif c <= short_entry_price * (1 - self.add_pct / 100 * (short_add_count + 1)):
                     signals.iloc[i] = _SHORT
-                    short_last_add = c
+                    short_add_count += 1
 
         return signals
 

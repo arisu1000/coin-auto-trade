@@ -6,7 +6,8 @@
   close >= candidate_low × (1 + entry_pct%)  →  첫 매수 (BUY)
 
 ─── 추가 매수 (피라미딩) ────────────────────────────────────────────────────
-포지션 보유 중, 직전 매수가 대비 add_pct% 상승마다 동일 금액 추가 매수 (BUY)
+포지션 보유 중, 첫 진입가 대비 add_pct% × N 상승마다 동일 금액 추가 매수 (BUY)
+예) entry=100, add_pct=10% → 110, 120, 130, ... (항상 진입가 기준 선형 단계)
 
 ─── 손절 ────────────────────────────────────────────────────────────────────
   close <= 첫 진입가 × (1 − stop_pct%)  →  전량 매도 (SELL)
@@ -82,15 +83,14 @@ class PyramidBreakoutStrategy(Strategy):
         signals = pd.Series(TradingSignal.HOLD, index=df.index, dtype=int)
 
         in_position = False
-        entry_price = 0.0       # 첫 진입가 (손절 기준)
-        last_add_price = 0.0    # 직전 매수가 (피라미딩 기준)
+        entry_price = 0.0       # 첫 진입가 (손절·피라미딩 기준)
         highest_price = 0.0     # 진입 이후 최고가 (트레일링 스탑 기준)
         candidate_low = close[0]  # 포지션 없을 때 추적하는 직전 저점
+        add_count = 0           # 누적 추가 매수 횟수
 
         entry_mult = 1 + self.entry_pct / 100
         stop_mult = 1 - self.stop_pct / 100
         trail_mult = 1 - self.trail_pct / 100
-        add_mult = 1 + self.add_pct / 100
 
         for i in range(1, n):
             c = close[i]
@@ -101,8 +101,8 @@ class PyramidBreakoutStrategy(Strategy):
                     signals.iloc[i] = TradingSignal.BUY
                     in_position = True
                     entry_price = c
-                    last_add_price = c
                     highest_price = c
+                    add_count = 0
                 else:
                     # 진입 전: 저점 계속 갱신
                     if c < candidate_low:
@@ -117,18 +117,19 @@ class PyramidBreakoutStrategy(Strategy):
                 if c <= entry_price * stop_mult:
                     signals.iloc[i] = TradingSignal.SELL
                     in_position = False
-                    candidate_low = c  # 청산 후 저점 초기화
+                    candidate_low = c
 
                 # ── 익절: 최고가 기준 트레일링 스탑 ─────────────────────
                 elif c <= highest_price * trail_mult:
                     signals.iloc[i] = TradingSignal.SELL
                     in_position = False
-                    candidate_low = c  # 청산 후 저점 초기화
+                    candidate_low = c
 
-                # ── 피라미딩: 직전 매수가 기준 ──────────────────────────
-                elif c >= last_add_price * add_mult:
+                # ── 피라미딩: 첫 진입가 기준 선형 단계 ──────────────────
+                # 다음 추가 매수 레벨 = entry × (1 + add_pct × (add_count + 1))
+                elif c >= entry_price * (1 + self.add_pct / 100 * (add_count + 1)):
                     signals.iloc[i] = TradingSignal.BUY
-                    last_add_price = c
+                    add_count += 1
 
         return signals
 
@@ -154,10 +155,9 @@ class PyramidBreakoutStrategy(Strategy):
         entry_mult = 1 + self.entry_pct / 100
         stop_mult = 1 - self.stop_pct / 100
         trail_mult = 1 - self.trail_pct / 100
-        add_mult = 1 + self.add_pct / 100
         entry_price = 0.0
-        last_add_price = 0.0
         highest_price = 0.0
+        add_count = 0
 
         for i in range(n):
             c = close[i]
@@ -168,8 +168,8 @@ class PyramidBreakoutStrategy(Strategy):
                     if c >= candidate_low * entry_mult:
                         in_position = True
                         entry_price = c
-                        last_add_price = c
                         highest_price = c
+                        add_count = 0
                     elif c < candidate_low:
                         candidate_low = c
             else:
@@ -178,8 +178,8 @@ class PyramidBreakoutStrategy(Strategy):
                 if c <= entry_price * stop_mult or c <= highest_price * trail_mult:
                     in_position = False
                     candidate_low = c
-                elif c >= last_add_price * add_mult:
-                    last_add_price = c
+                elif c >= entry_price * (1 + self.add_pct / 100 * (add_count + 1)):
+                    add_count += 1
 
         result["candidate_low"] = cand_low_arr
         result["entry_level"] = entry_level_arr
