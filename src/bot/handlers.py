@@ -24,27 +24,35 @@ class CommandHandlers:
         self._trader = trader
         self._strategy_manager = strategy_manager
 
-    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    def _help_text(self) -> str:
         mode_emoji = "📄" if self._settings.is_paper else "💰"
         mode_text = "모의 매매" if self._settings.is_paper else "실거래"
-        await update.message.reply_text(
+        return (
             f"🤖 <b>코인 자동매매 봇</b>\n\n"
             f"{mode_emoji} 현재 모드: <b>{mode_text}</b>\n\n"
-            f"사용 가능한 명령어:\n"
+            f"<b>조회</b>\n"
             f"/status - 현재 상태 조회\n"
             f"/settings - 현재 설정값 조회\n"
             f"/trades [개수] - 매매 기록 조회 (기본 10건)\n"
+            f"/logs [개수] - 최근 로그 조회\n"
+            f"/pyramid_status - 피라미딩 포지션 상태 조회\n\n"
+            f"<b>제어</b>\n"
             f"/halt - 매매 중단 (킬스위치)\n"
             f"/resume - 매매 재개\n"
             f"/strategy [이름] - 전략 변경\n"
-            f"/backtest [전략] [일수] - 백테스트 실행\n"
-            f"/logs [개수] - 최근 로그 조회\n"
-            f"/sync - 업비트 잔고 기준 피라미딩 상태 동기화\n"
-            f"/pyramid_status - 피라미딩 포지션 상태 조회\n"
-            f"/pyramid_set [마켓] [진입가] [횟수] - 피라미딩 상태 수동 설정\n"
-            f"/panic_sell - 긴급 전량 매도",
-            parse_mode="HTML",
+            f"/backtest [전략] [일수] - 백테스트 실행\n\n"
+            f"<b>피라미딩 동기화</b>\n"
+            f"/sync - 업비트 잔고 기준 상태 동기화\n"
+            f"/pyramid_set [마켓] [진입가] [횟수] - 상태 수동 설정\n\n"
+            f"<b>긴급</b>\n"
+            f"/panic_sell - 전량 시장가 매도"
         )
+
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await update.message.reply_text(self._help_text(), parse_mode="HTML")
+
+    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await update.message.reply_text(self._help_text(), parse_mode="HTML")
 
     async def _build_status_text(self) -> tuple[str, InlineKeyboardMarkup]:
         """상태 텍스트와 키보드 생성 (cmd_status, refresh_status 공유)"""

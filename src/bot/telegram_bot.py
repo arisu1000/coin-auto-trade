@@ -47,6 +47,7 @@ class TradingBot:
 
         # 인증 미들웨어 (모든 명령에 자동 적용)
         app.add_handler(CommandHandler("start", self._auth_wrap(self._handlers.cmd_start)))
+        app.add_handler(CommandHandler("help", self._auth_wrap(self._handlers.cmd_help)))
         app.add_handler(CommandHandler("status", self._auth_wrap(self._handlers.cmd_status)))
         app.add_handler(CommandHandler("halt", self._auth_wrap(self._handlers.cmd_halt)))
         app.add_handler(CommandHandler("resume", self._auth_wrap(self._handlers.cmd_resume)))
