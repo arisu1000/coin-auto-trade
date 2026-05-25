@@ -4,17 +4,14 @@
 FROM python:3.11-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential curl ca-certificates \
+    build-essential ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /tmp/ta-lib-build
 
-# TA-Lib 0.4.0 소스 다운로드 및 ARM64 네이티브 컴파일
-# curl -L: 리다이렉트 추적 (SourceForge 미러 대응), --retry: 네트워크 불안정 대비
-RUN curl -L --retry 5 --retry-delay 3 --max-time 120 \
-    "https://sourceforge.net/projects/ta-lib/files/ta-lib/0.4.0/ta-lib-0.4.0-src.tar.gz/download" \
-    -o ta-lib-0.4.0-src.tar.gz \
-    && tar -xzf ta-lib-0.4.0-src.tar.gz \
+# TA-Lib 0.4.0 소스 — 네트워크 의존성 제거를 위해 레포에 포함된 파일을 직접 사용
+COPY docker/ta-lib-0.4.0-src.tar.gz .
+RUN tar -xzf ta-lib-0.4.0-src.tar.gz \
     && cd ta-lib \
     && ./configure --prefix=/usr --build=aarch64-unknown-linux-gnu \
     && make -j$(nproc) \
