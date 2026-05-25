@@ -67,6 +67,7 @@ class Trader:
         # 피라미딩 실행 상태: 매번 재시뮬레이션으로 인한 중복 매수 방지
         # {market: {"entry_price": float, "add_count": int}}
         self._pyramid_state: dict[str, dict] = {}
+        self._pyramid_repo = None  # PyramidStateRepository (초기화 후 설정)
 
     async def run(self) -> None:
         """메인 실행 진입점"""
@@ -104,6 +105,13 @@ class Trader:
 
         # 매매 기록
         self._trade_repo = TradeRepository(self._db)
+
+        # 피라미딩 상태 복원
+        from src.persistence.repositories.pyramid_state import PyramidStateRepository
+        self._pyramid_repo = PyramidStateRepository(self._db)
+        self._pyramid_state = await self._pyramid_repo.load_all()
+        if self._pyramid_state:
+            logger.info("pyramid_state_restored", markets=list(self._pyramid_state.keys()))
 
         # 킬 스위치
         self._coordinator = KillSwitchCoordinator(
@@ -506,11 +514,14 @@ class Trader:
                         agent_thread_id=f"main_{market}",
                     )
 
-                # 피라미딩 상태 갱신
+                # 피라미딩 상태 갱신 및 DB 저장
                 if market not in self._pyramid_state:
                     self._pyramid_state[market] = {"entry_price": current_price, "add_count": 0}
                 else:
                     self._pyramid_state[market]["add_count"] += 1
+                if self._pyramid_repo:
+                    s = self._pyramid_state[market]
+                    await self._pyramid_repo.save(market, s["entry_price"], s["add_count"])
 
                 if self._bot:
                     state = self._pyramid_state[market]
@@ -561,8 +572,10 @@ class Trader:
                             pnl=trade_pnl,
                         )
 
-                # 피라미딩 상태 초기화
+                # 피라미딩 상태 초기화 및 DB 삭제
                 self._pyramid_state.pop(market, None)
+                if self._pyramid_repo:
+                    await self._pyramid_repo.delete(market)
 
                 if self._bot:
                     avg_price = coin_balance.avg_buy_price

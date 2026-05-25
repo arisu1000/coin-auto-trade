@@ -75,6 +75,18 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         )
         """,
     ),
+    (
+        3,
+        "pyramid_state",
+        """
+        CREATE TABLE IF NOT EXISTS pyramid_state (
+            market      TEXT NOT NULL PRIMARY KEY,
+            entry_price REAL NOT NULL,
+            add_count   INTEGER NOT NULL DEFAULT 0,
+            updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        )
+        """,
+    ),
 ]
 
 
