@@ -14,17 +14,24 @@ class PyramidStateRepository:
 
     # ── pyramid_state ────────────────────────────────────────────────
 
-    async def save(self, market: str, entry_price: float, add_count: int) -> None:
+    async def save(
+        self,
+        market: str,
+        entry_price: float,
+        add_count: int,
+        partial_taken: bool = False,
+    ) -> None:
         await self._db.execute(
             """
-            INSERT INTO pyramid_state(market, entry_price, add_count, updated_at)
-            VALUES(?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            INSERT INTO pyramid_state(market, entry_price, add_count, partial_taken, updated_at)
+            VALUES(?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             ON CONFLICT(market) DO UPDATE SET
-                entry_price = excluded.entry_price,
-                add_count   = excluded.add_count,
-                updated_at  = excluded.updated_at
+                entry_price   = excluded.entry_price,
+                add_count     = excluded.add_count,
+                partial_taken = excluded.partial_taken,
+                updated_at    = excluded.updated_at
             """,
-            (market, entry_price, add_count),
+            (market, entry_price, add_count, int(partial_taken)),
         )
         await self._db._conn.commit()
 
@@ -33,12 +40,16 @@ class PyramidStateRepository:
         await self._db._conn.commit()
 
     async def load_all(self) -> dict[str, dict]:
-        """저장된 전체 상태를 {market: {entry_price, add_count}} 형태로 반환"""
+        """저장된 전체 상태를 {market: {entry_price, add_count, partial_taken}} 형태로 반환"""
         rows = await self._db.fetchall(
-            "SELECT market, entry_price, add_count FROM pyramid_state"
+            "SELECT market, entry_price, add_count, partial_taken FROM pyramid_state"
         )
         return {
-            row["market"]: {"entry_price": row["entry_price"], "add_count": row["add_count"]}
+            row["market"]: {
+                "entry_price": row["entry_price"],
+                "add_count": row["add_count"],
+                "partial_taken": bool(row["partial_taken"]),
+            }
             for row in rows
         }
 

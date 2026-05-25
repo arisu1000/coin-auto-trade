@@ -165,9 +165,16 @@ class TestTrailingStop:
         assert signals.iloc[4] == TradingSignal.SELL
 
     def test_trailing_stop_follows_peak(self):
-        """최고가가 올라갈수록 익절 기준도 올라간다"""
-        # 진입 99 → 110 → 120(새 최고가) → 108(= 120 × 0.9) → 익절
-        prices = [100.0, 90.0, 99.0, 110.0, 120.0, 108.0]
+        """최고가가 올라갈수록 익절 기준도 올라간다.
+
+        avg_price 기반 트레일 가드: trail_threshold > avg_price 일 때만 발동.
+        피라미딩 추가매수로 avg_price가 상승하므로 trail이 avg_price를
+        충분히 초과하는 가격까지 올라야 발동된다.
+
+        진입 99 → 피라미딩 110, 200 → avg ≈ 124 → 최고가 200
+        trail 기준 = 200 × 0.9 = 180 > avg(124) → 178에서 익절 발동
+        """
+        prices = [100.0, 90.0, 99.0, 110.0, 200.0, 178.0]
         s = default_strategy()
         signals = s.generate_signals(make_df(prices))
         assert signals.iloc[5] == TradingSignal.SELL
@@ -228,10 +235,15 @@ class TestPyramiding:
 
 class TestReentry:
     def test_reentry_after_trailing_stop(self):
-        """익절 후 새 저점 대비 10% 상승 시 재진입"""
+        """익절 후 새 저점 대비 10% 상승 시 재진입.
+
+        피라미딩 1회(200) 후 avg ≈ 132.5.
+        trail 기준 = 200 × 0.9 = 180 > avg → 178에서 익절.
+        익절 후 저점 100 → 110.1 에서 재진입.
+        """
         prices = [
             100.0, 90.0, 99.1,    # 저점 90, 진입 99.1
-            120.0, 107.0,          # 최고 120, 120 × 0.9 = 108 → 107 익절
+            200.0, 178.0,          # 최고 200, 피라미딩 후 avg≈132.5, trail 180 → 178 익절
             100.0, 110.1,          # 100이 새 저점, 110.1 > 100 × 1.1 → 재진입
         ]
         s = default_strategy()

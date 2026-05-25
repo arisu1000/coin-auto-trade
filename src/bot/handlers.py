@@ -51,7 +51,9 @@ class CommandHandlers:
             f"<b>수동 매도</b>\n"
             f"/sell [마켓] - 특정 종목 즉시 시장가 매도 (생략 시 목록 표시)\n\n"
             f"<b>긴급</b>\n"
-            f"/panic_sell - 전량 시장가 매도"
+            f"/panic_sell - 전량 시장가 매도\n\n"
+            f"<b>설정</b>\n"
+            f"/reload_settings - .env 설정값 런타임 재로드"
         )
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -481,6 +483,26 @@ class CommandHandlers:
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
+
+    async def cmd_reload_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """.env 설정값을 런타임에 다시 로드한다."""
+        if not self._trader:
+            await update.message.reply_text("❌ 트레이더 미연결")
+            return
+        try:
+            result = await self._trader.reload_settings()
+            self._settings = self._trader._settings  # 핸들러 설정 레퍼런스 동기화
+            changes = result.get("changes", [])
+            if changes:
+                body = "\n".join(f"• {c}" for c in changes)
+                await update.message.reply_text(
+                    f"✅ <b>설정 재로드 완료</b>\n\n{body}",
+                    parse_mode="HTML",
+                )
+            else:
+                await update.message.reply_text("✅ 설정 재로드 완료. 변경된 값이 없습니다.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ 설정 재로드 실패: {e}")
 
     async def cmd_panic_sell(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """긴급 전량 시장가 매도"""

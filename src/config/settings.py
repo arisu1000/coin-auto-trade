@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     pyramid_stop_pct: float = 10.0           # 진입가 대비 손절 하락률 (%)
     pyramid_trail_pct: float = 10.0          # 최고가 대비 트레일링 스탑 하락률 (%)
     pyramid_sell_cooldown_minutes: int = 1440  # 매도 후 재진입 대기 시간 (분, 기본 24시간)
+    pyramid_partial_take_pct: float = 0.0     # 부분 익절 목표 수익률 % (0 = 비활성, e.g. 20.0 → 진입가 대비 +20%에서 익절)
+    pyramid_partial_sell_ratio: float = 0.5   # 부분 익절 시 매도 비율 (0.1~0.9, 기본 50%)
 
     # ─── 매수 제외 마켓 ───
     excluded_markets: str = ""               # 매수를 하지 않을 마켓 목록 (쉼표 구분, e.g. KRW-BTC,KRW-ETH)

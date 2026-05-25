@@ -108,6 +108,11 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         )
         """,
     ),
+    (
+        6,
+        "pyramid_state_partial_taken",
+        "ALTER TABLE pyramid_state ADD COLUMN partial_taken INTEGER NOT NULL DEFAULT 0",
+    ),
 ]
 
 

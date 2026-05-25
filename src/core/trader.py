@@ -64,6 +64,7 @@ class Trader:
         self._trade_repo: TradeRepository | None = None
         self._dynamic_markets: list[str] = []   # top_n 모드에서 사용
         self._market_refresh_ticks = 0           # 갱신 주기 카운터 (5분 × 12 = 1시간)
+        self._last_report_date = None            # 일일 리포트 마지막 발송일 (KST 기준)
         # 피라미딩 실행 상태: 매번 재시뮬레이션으로 인한 중복 매수 방지
         # {market: {"entry_price": float, "add_count": int}}
         self._pyramid_state: dict[str, dict] = {}
@@ -89,6 +90,7 @@ class Trader:
                 self._market_loop(),
                 self._strategy_loop(),
                 self._monitor_loop(),
+                self._report_loop(),
                 self._bot.start() if self._bot else asyncio.sleep(0),
             )
         except asyncio.CancelledError:
@@ -418,6 +420,11 @@ class Trader:
                             if direct == "SELL":
                                 decision = "SELL"
 
+                        # 부분 익절 체크 (전량 매도가 아닌 경우에만)
+                        if decision != "SELL" and market in self._pyramid_state:
+                            if self._check_partial_take(market, current_price):
+                                await self._execute_partial_sell(market, current_price)
+
                         confidence = 1.0
                         override_amount = getattr(strategy, "unit_amount", None)
                         agent_result = {
@@ -634,7 +641,10 @@ class Trader:
                         self._position_highest[market] = current_price
                 if self._pyramid_repo:
                     s = self._pyramid_state[market]
-                    await self._pyramid_repo.save(market, s["entry_price"], s["add_count"])
+                    await self._pyramid_repo.save(
+                        market, s["entry_price"], s["add_count"],
+                        partial_taken=s.get("partial_taken", False),
+                    )
 
                 if self._bot:
                     state = self._pyramid_state[market]
@@ -769,9 +779,9 @@ class Trader:
 
     async def set_pyramid_state(self, market: str, entry_price: float, add_count: int) -> None:
         """피라미딩 상태 수동 설정 (/pyramid_set 명령)"""
-        self._pyramid_state[market] = {"entry_price": entry_price, "add_count": add_count}
+        self._pyramid_state[market] = {"entry_price": entry_price, "add_count": add_count, "partial_taken": False}
         if self._pyramid_repo:
-            await self._pyramid_repo.save(market, entry_price, add_count)
+            await self._pyramid_repo.save(market, entry_price, add_count, partial_taken=False)
         logger.info("pyramid_state_manual_set", market=market,
                     entry_price=entry_price, add_count=add_count)
 
@@ -874,6 +884,246 @@ class Trader:
             await self._excluded_repo.remove(market)
         logger.info("market_buy_unblocked", market=market)
         return True
+
+    def _check_partial_take(self, market: str, current_price: float) -> bool:
+        """부분 익절 조건 확인. pyramid_partial_take_pct가 0이면 비활성."""
+        take_pct = self._settings.pyramid_partial_take_pct
+        if take_pct <= 0:
+            return False
+        state = self._pyramid_state.get(market)
+        if state is None or state.get("partial_taken", False):
+            return False
+        target = state["entry_price"] * (1 + take_pct / 100)
+        return current_price >= target
+
+    async def _execute_partial_sell(self, market: str, current_price: float) -> None:
+        """보유량의 일부를 시장가로 매도한다 (부분 익절)."""
+        ratio = self._settings.pyramid_partial_sell_ratio
+        state = self._pyramid_state.get(market)
+        if state is None:
+            return
+
+        if self._settings.is_paper:
+            logger.info(
+                "paper_partial_take_simulated",
+                market=market,
+                price=round(current_price),
+                ratio=ratio,
+            )
+            state["partial_taken"] = True
+            if self._pyramid_repo:
+                await self._pyramid_repo.save(
+                    market, state["entry_price"], state["add_count"], partial_taken=True
+                )
+            return
+
+        coin_currency = market.split("-")[1]
+        try:
+            balances = await self._upbit_ctx.get_balances()
+            coin_balance = next((b for b in balances if b.currency == coin_currency), None)
+            if coin_balance is None or coin_balance.available <= 0:
+                return
+
+            partial_vol = coin_balance.available * ratio
+            if current_price * partial_vol < 5000:
+                logger.warning("partial_take_skipped_min_amount", market=market, volume=partial_vol)
+                return
+
+            order = await self._upbit_ctx.place_order(
+                market=market,
+                side="ask",
+                volume=partial_vol,
+                ord_type="market",
+            )
+            logger.info("partial_take_order_placed", market=market, uuid=order.uuid, volume=partial_vol)
+
+            state["partial_taken"] = True
+            if self._pyramid_repo:
+                await self._pyramid_repo.save(
+                    market, state["entry_price"], state["add_count"], partial_taken=True
+                )
+
+            if self._bot:
+                avg = coin_balance.avg_buy_price
+                pnl_pct = (current_price - avg) / avg * 100 if avg > 0 else 0.0
+                pnl_emoji = "📈" if pnl_pct >= 0 else "📉"
+                asyncio.create_task(self._bot.send_alert(
+                    f"🟡 <b>부분 익절 체결</b>\n\n"
+                    f"마켓: <code>{market}</code>\n"
+                    f"매도 비율: {ratio * 100:.0f}% ({partial_vol:.6f}개)\n"
+                    f"현재가: {current_price:,.0f}원\n"
+                    f"평균단가: {avg:,.0f}원\n"
+                    f"{pnl_emoji} 손익: {pnl_pct:+.2f}%\n"
+                    f"나머지는 트레일링 스탑으로 운영합니다."
+                ))
+        except Exception as e:
+            logger.error("partial_take_failed", market=market, error=str(e))
+
+    async def _report_loop(self) -> None:
+        """KST 자정마다 일일 성과 리포트를 텔레그램으로 발송한다."""
+        KST_OFFSET_SEC = 9 * 3600
+
+        while self._running:
+            try:
+                now_kst_ts = datetime.now(timezone.utc).timestamp() + KST_OFFSET_SEC
+                today_kst = datetime.fromtimestamp(now_kst_ts, tz=timezone.utc).date()
+
+                if self._last_report_date != today_kst:
+                    if self._last_report_date is not None:  # 최초 기동 시 즉시 발송 방지
+                        await self._send_daily_report()
+                    self._last_report_date = today_kst
+
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("report_loop_error", error=str(e))
+                await asyncio.sleep(60)
+
+    async def _send_daily_report(self) -> None:
+        """일일 성과 리포트 빌드 및 텔레그램 발송."""
+        if not self._bot or not self._trade_repo:
+            return
+        try:
+            summary = await self._trade_repo.get_performance_summary(days=30)
+            total = summary.get("total_trades", 0)
+            wins = summary.get("wins", 0)
+            total_pnl = summary.get("total_pnl") or 0.0
+            win_rate = wins / total * 100 if total > 0 else 0.0
+
+            balances = await self._upbit_ctx.get_balances()
+            krw = next((b.available for b in balances if b.currency == "KRW"), 0.0)
+            coin_value = sum(
+                b.available * b.avg_buy_price for b in balances if b.currency != "KRW"
+            )
+            total_equity = krw + coin_value
+
+            # MDD (최근 30일)
+            portfolio_repo = PortfolioRepository(self._db)
+            curve = await portfolio_repo.get_equity_curve(hours=24 * 30)
+            mdd = 0.0
+            peak = 0.0
+            for point in curve:
+                eq = point.get("equity", 0)
+                if eq > peak:
+                    peak = eq
+                if peak > 0:
+                    dd = (peak - eq) / peak * 100
+                    if dd > mdd:
+                        mdd = dd
+
+            # 보유 포지션별 현재 손익
+            position_lines = []
+            for bal in balances:
+                if bal.currency == "KRW" or bal.available <= 0:
+                    continue
+                market = f"KRW-{bal.currency}"
+                try:
+                    ticker = await self._upbit_ctx.get_ticker([market])
+                    cur_price = float(ticker[0]["trade_price"]) if ticker else 0
+                    if cur_price > 0 and bal.avg_buy_price > 0:
+                        pnl_pct = (cur_price - bal.avg_buy_price) / bal.avg_buy_price * 100
+                        emoji = "📈" if pnl_pct >= 0 else "📉"
+                        position_lines.append(
+                            f"{emoji} <code>{market}</code>: {pnl_pct:+.2f}% "
+                            f"({bal.avg_buy_price:,.0f} → {cur_price:,.0f}원)"
+                        )
+                    await asyncio.sleep(0.1)
+                except Exception:
+                    position_lines.append(f"• <code>{market}</code>: 조회 실패")
+
+            pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+            now_kst_ts = datetime.now(timezone.utc).timestamp() + 9 * 3600
+            kst_str = datetime.fromtimestamp(now_kst_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+
+            lines = [
+                f"📊 <b>일일 성과 리포트</b> ({kst_str} KST)\n",
+                f"<b>최근 30일 매매 성과</b>",
+                f"총 거래: {total}건  |  승률: {win_rate:.1f}%",
+                f"{pnl_emoji} 누적 손익: {total_pnl:+,.0f}원",
+                f"MDD: {mdd:.1f}%\n",
+                f"<b>현재 자산</b>",
+                f"총 자산: {total_equity:,.0f}원",
+                f"원화: {krw:,.0f}원  |  코인 평가액: {coin_value:,.0f}원\n",
+            ]
+            if position_lines:
+                lines.append("<b>보유 포지션</b>")
+                lines.extend(position_lines)
+            else:
+                lines.append("보유 포지션: 없음")
+
+            await self._bot.send_alert("\n".join(lines))
+        except Exception as e:
+            logger.error("daily_report_failed", error=str(e))
+
+    async def reload_settings(self) -> dict:
+        """런타임에 .env 파일을 다시 읽어 설정값을 갱신한다.
+
+        즉시 반영: 전략 파라미터, 킬스위치 임계치, 매매 주기, 잔고 경고 등
+        재시작 필요: API 키, 텔레그램 토큰, DB 경로, 거래 모드
+        """
+        from src.config.settings import Settings
+
+        try:
+            new = Settings()
+        except Exception as e:
+            raise ValueError(f"설정 파일 파싱 실패: {e}")
+
+        changes = []
+
+        # 전략 파라미터 갱신
+        strategy = self._strategy_manager.get_active() if self._strategy_manager else None
+        if strategy and "pyramid" in strategy.name:
+            old_params = {k: getattr(self._settings, k) for k in
+                          ("pyramid_unit_amount", "pyramid_stop_pct", "pyramid_trail_pct",
+                           "pyramid_add_pct", "pyramid_entry_pct")}
+            new_params_raw = {k: getattr(new, k) for k in old_params}
+            if old_params != new_params_raw:
+                param_map = {k.replace("pyramid_", ""): v for k, v in new_params_raw.items()}
+                # unit_amount_ 키 보정
+                param_map["unit_amount"] = new_params_raw["pyramid_unit_amount"]
+                param_map.pop("pyramid_unit_amount", None)
+                self._strategy_manager.activate(strategy.name, params={
+                    "unit_amount": new.pyramid_unit_amount,
+                    "entry_pct": new.pyramid_entry_pct,
+                    "add_pct": new.pyramid_add_pct,
+                    "stop_pct": new.pyramid_stop_pct,
+                    "trail_pct": new.pyramid_trail_pct,
+                })
+                changes.append(
+                    f"전략 파라미터: stop={new.pyramid_stop_pct}% trail={new.pyramid_trail_pct}% "
+                    f"add={new.pyramid_add_pct}% unit={new.pyramid_unit_amount:,.0f}원"
+                )
+
+        # 킬스위치 임계치 갱신
+        if self._coordinator:
+            if new.macro_max_drawdown_pct != self._settings.macro_max_drawdown_pct:
+                self._coordinator._macro_threshold = new.macro_max_drawdown_pct
+                changes.append(f"매크로 킬스위치: {new.macro_max_drawdown_pct}%")
+            if new.micro_stop_loss_pct != self._settings.micro_stop_loss_pct:
+                self._coordinator._micro_threshold = new.micro_stop_loss_pct
+                changes.append(f"마이크로 킬스위치: {new.micro_stop_loss_pct}%")
+
+        # 기타 수치 설정
+        simple_fields = [
+            ("trade_interval_seconds", "매매 주기"),
+            ("candle_unit_minutes", "진입 캔들"),
+            ("candle_unit_position_minutes", "보유중 캔들"),
+            ("candle_count", "캔들 수"),
+            ("min_krw_alert", "잔고 경고 기준"),
+            ("pyramid_sell_cooldown_minutes", "재진입 쿨다운"),
+            ("pyramid_partial_take_pct", "부분 익절 목표"),
+            ("pyramid_partial_sell_ratio", "부분 익절 비율"),
+        ]
+        for field, label in simple_fields:
+            old_val = getattr(self._settings, field, None)
+            new_val = getattr(new, field, None)
+            if old_val != new_val:
+                changes.append(f"{label}: {old_val} → {new_val}")
+
+        self._settings = new
+        logger.info("settings_reloaded", changes=changes)
+        return {"changes": changes}
 
     async def sell_market(self, market: str) -> bool:
         """특정 마켓 즉시 시장가 매도 (/sell 명령). 보유 중이 아니면 False."""
