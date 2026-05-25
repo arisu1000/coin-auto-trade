@@ -67,6 +67,8 @@ class Trader:
         # 피라미딩 실행 상태: 매번 재시뮬레이션으로 인한 중복 매수 방지
         # {market: {"entry_price": float, "add_count": int}}
         self._pyramid_state: dict[str, dict] = {}
+        # 매도 후 재진입 쿨다운: {market: sell_at(datetime UTC)}
+        self._sell_cooldown: dict[str, datetime] = {}
         self._pyramid_repo = None  # PyramidStateRepository (초기화 후 설정)
 
     async def run(self) -> None:
@@ -112,6 +114,13 @@ class Trader:
         self._pyramid_state = await self._pyramid_repo.load_all()
         if self._pyramid_state:
             logger.info("pyramid_state_restored", markets=list(self._pyramid_state.keys()))
+        cooldowns_raw = await self._pyramid_repo.load_cooldowns()
+        self._sell_cooldown = {
+            m: datetime.fromisoformat(ts)
+            for m, ts in cooldowns_raw.items()
+        }
+        if self._sell_cooldown:
+            logger.info("pyramid_cooldown_restored", markets=list(self._sell_cooldown.keys()))
 
         # 킬 스위치
         self._coordinator = KillSwitchCoordinator(
@@ -532,6 +541,10 @@ class Trader:
                 # 피라미딩 상태 갱신 및 DB 저장
                 if market not in self._pyramid_state:
                     self._pyramid_state[market] = {"entry_price": current_price, "add_count": 0}
+                    # 신규 진입 시 쿨다운 해제
+                    self._sell_cooldown.pop(market, None)
+                    if self._pyramid_repo:
+                        await self._pyramid_repo.delete_cooldown(market)
                 else:
                     self._pyramid_state[market]["add_count"] += 1
                 if self._pyramid_repo:
@@ -591,6 +604,12 @@ class Trader:
                 self._pyramid_state.pop(market, None)
                 if self._pyramid_repo:
                     await self._pyramid_repo.delete(market)
+
+                # 매도 후 재진입 쿨다운 기록
+                now = datetime.now(timezone.utc)
+                self._sell_cooldown[market] = now
+                if self._pyramid_repo:
+                    await self._pyramid_repo.save_cooldown(market, now.isoformat())
 
                 if self._bot:
                     avg_price = coin_balance.avg_buy_price
@@ -678,6 +697,19 @@ class Trader:
         """
         state = self._pyramid_state.get(market)
         if state is None:
+            # 쿨다운 중이면 재진입 차단
+            sell_time = self._sell_cooldown.get(market)
+            if sell_time:
+                elapsed = (datetime.now(timezone.utc) - sell_time).total_seconds() / 60
+                cooldown = self._settings.pyramid_sell_cooldown_minutes
+                if elapsed < cooldown:
+                    remaining = int(cooldown - elapsed)
+                    logger.info(
+                        "pyramid_reentry_blocked_cooldown",
+                        market=market,
+                        remaining_minutes=remaining,
+                    )
+                    return False
             return market not in self._held_markets
 
         add_pct = getattr(strategy, "add_pct", 10.0)

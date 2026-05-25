@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     pyramid_add_pct: float = 10.0            # 진입가 대비 추가매수 간격 (%)
     pyramid_stop_pct: float = 10.0           # 진입가 대비 손절 하락률 (%)
     pyramid_trail_pct: float = 10.0          # 최고가 대비 트레일링 스탑 하락률 (%)
+    pyramid_sell_cooldown_minutes: int = 1440  # 매도 후 재진입 대기 시간 (분, 기본 24시간)
 
     # ─── 잔고 경고 ───
     min_krw_alert: float = 10_000.0          # 원화 잔고가 이 금액 이하일 때 텔레그램 경고 발송

@@ -87,6 +87,16 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         )
         """,
     ),
+    (
+        4,
+        "pyramid_cooldown",
+        """
+        CREATE TABLE IF NOT EXISTS pyramid_cooldown (
+            market   TEXT NOT NULL PRIMARY KEY,
+            sell_at  TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 
