@@ -53,6 +53,8 @@ class CommandHandlers:
             f"<b>긴급</b>\n"
             f"/panic_sell - 전량 시장가 매도\n\n"
             f"<b>설정</b>\n"
+            f"/set_param [파라미터] [값] - 피라미딩 파라미터 즉시 변경\n"
+            f"  trail_pct / stop_pct / add_pct / entry_pct / unit_amount\n"
             f"/reload_settings - .env 설정값 런타임 재로드"
         )
 
@@ -483,6 +485,81 @@ class CommandHandlers:
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
+
+    async def cmd_set_param(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """피라미딩 전략 파라미터 즉시 변경 (재시작 전까지 유효).
+        사용법: /set_param [파라미터] [값]
+        """
+        args = context.args or []
+        if len(args) != 2:
+            await update.message.reply_text(
+                "사용법: <code>/set_param [파라미터] [값]</code>\n\n"
+                "변경 가능한 파라미터:\n"
+                "  <code>trail_pct</code>   — 트레일링 스탑 (%)\n"
+                "  <code>stop_pct</code>    — 손절 (%)\n"
+                "  <code>add_pct</code>     — 추가매수 간격 (%)\n"
+                "  <code>entry_pct</code>   — 진입 기준 (%)\n"
+                "  <code>unit_amount</code> — 1회 투입 금액 (원)\n\n"
+                "예) <code>/set_param trail_pct 5</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        param = args[0].lower()
+        valid_params = {"trail_pct", "stop_pct", "add_pct", "entry_pct", "unit_amount"}
+        if param not in valid_params:
+            await update.message.reply_text(
+                f"❌ 알 수 없는 파라미터: <code>{param}</code>\n"
+                f"변경 가능: {', '.join(sorted(valid_params))}",
+                parse_mode="HTML",
+            )
+            return
+
+        try:
+            value = float(args[1].replace(",", ""))
+        except ValueError:
+            await update.message.reply_text("❌ 값이 올바르지 않습니다. 숫자를 입력하세요.")
+            return
+
+        if not self._strategy_manager:
+            await update.message.reply_text("❌ 전략 매니저 미연결")
+            return
+
+        strategy = self._strategy_manager.get_active()
+        if not strategy or "pyramid" not in strategy.name:
+            await update.message.reply_text("❌ 현재 피라미딩 전략이 활성화되어 있지 않습니다.")
+            return
+
+        current = {
+            "unit_amount": getattr(strategy, "unit_amount", self._settings.pyramid_unit_amount),
+            "entry_pct":   getattr(strategy, "entry_pct",   self._settings.pyramid_entry_pct),
+            "add_pct":     getattr(strategy, "add_pct",     self._settings.pyramid_add_pct),
+            "stop_pct":    getattr(strategy, "stop_pct",    self._settings.pyramid_stop_pct),
+            "trail_pct":   getattr(strategy, "trail_pct",   self._settings.pyramid_trail_pct),
+        }
+        old_value = current[param]
+        current[param] = value
+
+        try:
+            self._strategy_manager.activate(strategy.name, params=current)
+        except Exception as e:
+            await update.message.reply_text(f"❌ 파라미터 변경 실패: {e}")
+            return
+
+        labels = {
+            "trail_pct":   "트레일링 스탑",
+            "stop_pct":    "손절",
+            "add_pct":     "추가매수 간격",
+            "entry_pct":   "진입 기준",
+            "unit_amount": "1회 투입 금액",
+        }
+        unit = "원" if param == "unit_amount" else "%"
+        await update.message.reply_text(
+            f"✅ <b>{labels[param]} 변경 완료</b>\n\n"
+            f"{old_value:,.0f}{unit} → <b>{value:,.0f}{unit}</b>\n\n"
+            f"<i>⚠️ 재시작 시 .env 값으로 초기화됩니다.</i>",
+            parse_mode="HTML",
+        )
 
     async def cmd_reload_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """.env 설정값을 런타임에 다시 로드한다."""

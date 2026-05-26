@@ -64,6 +64,7 @@ class TradingBot:
         app.add_handler(CommandHandler("blocked", self._auth_wrap(self._handlers.cmd_blocked)))
         app.add_handler(CommandHandler("sell", self._auth_wrap(self._handlers.cmd_sell)))
         app.add_handler(CommandHandler("panic_sell", self._auth_wrap(self._handlers.cmd_panic_sell)))
+        app.add_handler(CommandHandler("set_param", self._auth_wrap(self._handlers.cmd_set_param)))
         app.add_handler(CommandHandler("reload_settings", self._auth_wrap(self._handlers.cmd_reload_settings)))
 
         # 인라인 버튼 콜백
