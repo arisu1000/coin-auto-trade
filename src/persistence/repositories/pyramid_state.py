@@ -20,18 +20,20 @@ class PyramidStateRepository:
         entry_price: float,
         add_count: int,
         partial_taken: bool = False,
+        highest_price: float = 0.0,
     ) -> None:
         await self._db.execute(
             """
-            INSERT INTO pyramid_state(market, entry_price, add_count, partial_taken, updated_at)
-            VALUES(?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            INSERT INTO pyramid_state(market, entry_price, add_count, partial_taken, highest_price, updated_at)
+            VALUES(?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             ON CONFLICT(market) DO UPDATE SET
                 entry_price   = excluded.entry_price,
                 add_count     = excluded.add_count,
                 partial_taken = excluded.partial_taken,
+                highest_price = excluded.highest_price,
                 updated_at    = excluded.updated_at
             """,
-            (market, entry_price, add_count, int(partial_taken)),
+            (market, entry_price, add_count, int(partial_taken), highest_price),
         )
         await self._db._conn.commit()
 
@@ -40,15 +42,16 @@ class PyramidStateRepository:
         await self._db._conn.commit()
 
     async def load_all(self) -> dict[str, dict]:
-        """저장된 전체 상태를 {market: {entry_price, add_count, partial_taken}} 형태로 반환"""
+        """저장된 전체 상태를 {market: {entry_price, add_count, partial_taken, highest_price}} 형태로 반환"""
         rows = await self._db.fetchall(
-            "SELECT market, entry_price, add_count, partial_taken FROM pyramid_state"
+            "SELECT market, entry_price, add_count, partial_taken, highest_price FROM pyramid_state"
         )
         return {
             row["market"]: {
                 "entry_price": row["entry_price"],
                 "add_count": row["add_count"],
                 "partial_taken": bool(row["partial_taken"]),
+                "highest_price": row["highest_price"] or 0.0,
             }
             for row in rows
         }

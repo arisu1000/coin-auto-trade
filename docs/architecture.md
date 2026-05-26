@@ -162,20 +162,40 @@ candle_cache.get_missing_range()
 
 ```
 포지션이 _pyramid_state에 있으면:
-    avg_price = 실제 평균단가 (DB에서 복원 또는 수동 설정)
-    highest   = 해당 마켓의 포지션 보유 이후 최고가
+    avg_price   = 실제 평균단가 (DB에서 복원 또는 수동 설정)
+    candle_high = 해당 캔들의 고가 (intraday 고점 반영)
+    candle_low  = 해당 캔들의 저가 (intraday 이탈 감지)
+
+    highest = max(_position_highest[market], current_price, candle_high)
+    _position_highest[market] = highest  ← DB에도 즉시 저장
 
     stop_threshold  = avg_price × (1 - stop_pct / 100)
     trail_threshold = highest × (1 - trail_pct / 100)
+    check_price = candle_low (없으면 current_price)
 
-    current_price <= stop_threshold            → SELL (손절)
+    check_price <= stop_threshold            → SELL (손절)
     trail_threshold > avg_price
-      AND current_price <= trail_threshold     → SELL (트레일링 스탑)
+      AND check_price <= trail_threshold     → SELL (트레일링 스탑)
 ```
 
 **핵심 설계 결정:**
 - 손절·트레일링 스탑 기준을 **진입가가 아닌 평균단가(avg_price)** 로 계산합니다. 추가매수로 단가가 낮아진 경우 실제 손익과 일치시키기 위함입니다.
 - 트레일링 스탑은 `trail_threshold > avg_price`일 때만 발동합니다. 포지션이 아직 수익권에 진입하지 않은 상태에서 최고가 기준 역방향 스탑이 진입가 근처에서 조기 청산하는 문제를 방지합니다.
+- **캔들 고가(HIGH)로 최고가 갱신:** `current_price`(종가)만 보면 intraday 고점을 놓칩니다. 캔들 HIGH를 함께 비교하여 실제 관측 고점을 정확히 추적합니다.
+- **캔들 저가(LOW)로 손절·트레일 비교:** 종가 기준이면 캔들 내에서 이미 기준선을 이탈한 경우를 다음 틱까지 감지하지 못합니다. 캔들 LOW를 비교 기준으로 사용해 intraday 이탈을 즉시 감지합니다.
+- **최고가 DB 영속화:** `_position_highest`가 재시작마다 초기화되면 트레일링 스탑 기준선이 낮아집니다. `highest_price` 컬럼을 `pyramid_state` 테이블에 저장하고 최고가 갱신 시마다 즉시 커밋합니다.
+
+### 재시작 시 최고가 복원 순서
+
+```
+1. DB load_all() → highest_price > 0 이면 그대로 복원
+2. highest_price == 0 (이전 버전 레코드 또는 신규) 이면:
+       캔들 히스토리 max(HIGH) 계산
+       _position_highest = max(hist_high, entry_price)
+       로그: position_highest_restored_from_candles
+```
+
+이 절차를 통해 구버전 DB 레코드가 있어도 최고가를 합리적으로 초기화합니다.
 
 ---
 
@@ -310,7 +330,7 @@ Settings() 새 인스턴스 생성 (.env 재파싱, lru_cache 우회)
 | `bot_logs` | 시스템 로그 (레벨별) | created_at, level |
 | `agent_checkpoints` | LangGraph 상태 영속화 | thread_id (PK) |
 | `kill_switch_state` | 킬스위치 상태 영속화 (재시작 복원용) | id (PK) |
-| `pyramid_state` | 피라미딩 포지션 상태 (진입가·추가매수 횟수·부분익절여부) | market (PK) |
+| `pyramid_state` | 피라미딩 포지션 상태 (진입가·추가매수 횟수·부분익절여부·최고가) | market (PK) |
 | `sell_cooldown` | 매도 후 재진입 대기 기록 | market (PK) |
 | `excluded_markets` | 매수 금지 마켓 목록 (사유 포함) | market (PK) |
 

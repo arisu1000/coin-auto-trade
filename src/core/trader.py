@@ -135,9 +135,10 @@ class Trader:
         self._pyramid_state = await self._pyramid_repo.load_all()
         if self._pyramid_state:
             logger.info("pyramid_state_restored", markets=list(self._pyramid_state.keys()))
-            # 최고가를 알 수 없으므로 진입가로 초기화 — 이후 매 tick 갱신됨
+            # highest_price가 저장돼 있으면 복원, 없으면 진입가로 초기화
             self._position_highest = {
-                m: s["entry_price"] for m, s in self._pyramid_state.items()
+                m: (s.get("highest_price") or s["entry_price"])
+                for m, s in self._pyramid_state.items()
             }
         cooldowns_raw = await self._pyramid_repo.load_cooldowns()
         self._sell_cooldown = {
@@ -380,6 +381,23 @@ class Trader:
         # 첫 데이터 수집 대기
         await asyncio.sleep(self._settings.trade_interval_seconds * 2)
 
+        # 재시작 후 DB에 최고가가 없는 포지션은 캔들 히스토리 고가로 보정
+        # (재시작 전 최고가를 잃었을 때 entry_price 대신 실제 관측 고가로 초기화)
+        for mkt, state in self._pyramid_state.items():
+            if not state.get("highest_price"):
+                df_init = self._latest_candles.get(mkt)
+                if df_init is not None and len(df_init) > 0:
+                    hist_high = float(df_init["high"].max())
+                    restored = max(hist_high, state["entry_price"])
+                    self._position_highest[mkt] = restored
+                    logger.info(
+                        "position_highest_restored_from_candles",
+                        market=mkt,
+                        entry_price=round(state["entry_price"]),
+                        candle_high=round(hist_high),
+                        restored_to=round(restored),
+                    )
+
         while self._running:
             try:
                 target_set = (
@@ -401,6 +419,8 @@ class Trader:
 
                     if is_pyramid:
                         current_price = float(df["close"].iloc[-1])
+                        candle_high = float(df["high"].iloc[-1])
+                        candle_low = float(df["low"].iloc[-1])
 
                         # 피라미딩 전략: generate_signals() 직접 호출 (LangGraph 우회)
                         signals = strategy.generate_signals(df)
@@ -416,9 +436,30 @@ class Trader:
                         # 직접 손절/트레일 체크: 시뮬레이션이 실제 진입가를 모를 때 대비
                         # (캔들 윈도우 밖 진입, /sync·/pyramid_set 수동 등록 케이스)
                         if decision != "SELL" and market in self._pyramid_state:
-                            direct = self._check_position_exit(market, current_price, strategy)
+                            prev_highest = self._position_highest.get(market, 0)
+                            direct = self._check_position_exit(
+                                market, current_price, strategy,
+                                candle_high=candle_high,
+                                candle_low=candle_low,
+                            )
                             if direct == "SELL":
                                 decision = "SELL"
+                            else:
+                                new_highest = self._position_highest.get(market, 0)
+                                if new_highest > prev_highest and self._pyramid_repo:
+                                    s = self._pyramid_state[market]
+                                    await self._pyramid_repo.save(
+                                        market, s["entry_price"], s["add_count"],
+                                        partial_taken=s.get("partial_taken", False),
+                                        highest_price=new_highest,
+                                    )
+
+                        # 직접 피라미딩 추가매수 체크: generate_signals() 시뮬레이션 내부
+                        # add_count가 _pyramid_state와 불일치할 때(캔들 윈도우 밖 진입·수동 등록)
+                        # 시뮬레이션이 HOLD를 반환해도 실제 기준가를 돌파한 경우 BUY 강제
+                        if decision == "HOLD" and market in self._pyramid_state:
+                            if self._pyramid_add_allowed(market, current_price, strategy):
+                                decision = "BUY"
 
                         # 부분 익절 체크 (전량 매도가 아닌 경우에만)
                         if decision != "SELL" and market in self._pyramid_state:
@@ -644,6 +685,7 @@ class Trader:
                     await self._pyramid_repo.save(
                         market, s["entry_price"], s["add_count"],
                         partial_taken=s.get("partial_taken", False),
+                        highest_price=self._position_highest.get(market, s["entry_price"]),
                     )
 
                 if self._bot:
@@ -770,8 +812,10 @@ class Trader:
                     "entry_price": bal.avg_buy_price,
                     "add_count": 0,
                 }
+                self._position_highest[market] = bal.avg_buy_price
                 if self._pyramid_repo:
-                    await self._pyramid_repo.save(market, bal.avg_buy_price, 0)
+                    await self._pyramid_repo.save(market, bal.avg_buy_price, 0,
+                                                  highest_price=bal.avg_buy_price)
                 added.append(f"{market}@{bal.avg_buy_price:,.0f}")
 
         logger.info("pyramid_state_synced", removed=removed, added=added)
@@ -780,17 +824,29 @@ class Trader:
     async def set_pyramid_state(self, market: str, entry_price: float, add_count: int) -> None:
         """피라미딩 상태 수동 설정 (/pyramid_set 명령)"""
         self._pyramid_state[market] = {"entry_price": entry_price, "add_count": add_count, "partial_taken": False}
+        self._position_highest[market] = entry_price
         if self._pyramid_repo:
-            await self._pyramid_repo.save(market, entry_price, add_count, partial_taken=False)
+            await self._pyramid_repo.save(market, entry_price, add_count, partial_taken=False,
+                                          highest_price=entry_price)
         logger.info("pyramid_state_manual_set", market=market,
                     entry_price=entry_price, add_count=add_count)
 
-    def _check_position_exit(self, market: str, current_price: float, strategy) -> str:
+    def _check_position_exit(
+        self,
+        market: str,
+        current_price: float,
+        strategy,
+        candle_high: float | None = None,
+        candle_low: float | None = None,
+    ) -> str:
         """_pyramid_state 기준으로 손절·트레일 조건을 직접 확인한다.
 
         시뮬레이션(generate_signals)이 캔들 윈도우 밖의 실제 진입가를 알지 못하거나
         /sync·/pyramid_set으로 수동 등록된 포지션에도 손절이 작동하도록 한다.
         SELL 또는 HOLD 반환.
+
+        candle_high: 해당 캔들의 고가 — 최고가 갱신에 사용 (intraday 고점 반영)
+        candle_low:  해당 캔들의 저가 — 손절·트레일 비교에 사용 (intraday 이탈 감지)
         """
         state = self._pyramid_state.get(market)
         if state is None:
@@ -800,29 +856,32 @@ class Trader:
         stop_pct = getattr(strategy, "stop_pct", 10.0)
         trail_pct = getattr(strategy, "trail_pct", 10.0)
 
-        # 최고가 갱신
+        # 최고가 갱신: 캔들 고가(intraday high)까지 반영
         prev_highest = self._position_highest.get(market, entry_price)
-        highest = max(prev_highest, current_price)
+        highest = max(prev_highest, current_price, candle_high or 0)
         self._position_highest[market] = highest
+
+        # 비교 기준: 캔들 저가 우선 — intraday 이탈도 감지
+        check_price = candle_low if candle_low is not None else current_price
 
         stop_threshold = entry_price * (1 - stop_pct / 100)
         trail_threshold = highest * (1 - trail_pct / 100)
 
-        if current_price <= stop_threshold:
+        if check_price <= stop_threshold:
             logger.info(
                 "direct_stop_loss_triggered",
                 market=market,
-                current=round(current_price),
+                current=round(check_price),
                 entry=round(entry_price),
                 threshold=round(stop_threshold),
             )
             return "SELL"
 
-        if trail_threshold > entry_price and current_price <= trail_threshold:
+        if trail_threshold > entry_price and check_price <= trail_threshold:
             logger.info(
                 "direct_trail_stop_triggered",
                 market=market,
-                current=round(current_price),
+                current=round(check_price),
                 highest=round(highest),
                 threshold=round(trail_threshold),
             )
@@ -913,7 +972,8 @@ class Trader:
             state["partial_taken"] = True
             if self._pyramid_repo:
                 await self._pyramid_repo.save(
-                    market, state["entry_price"], state["add_count"], partial_taken=True
+                    market, state["entry_price"], state["add_count"], partial_taken=True,
+                    highest_price=self._position_highest.get(market, state["entry_price"]),
                 )
             return
 
@@ -940,7 +1000,8 @@ class Trader:
             state["partial_taken"] = True
             if self._pyramid_repo:
                 await self._pyramid_repo.save(
-                    market, state["entry_price"], state["add_count"], partial_taken=True
+                    market, state["entry_price"], state["add_count"], partial_taken=True,
+                    highest_price=self._position_highest.get(market, state["entry_price"]),
                 )
 
             if self._bot:

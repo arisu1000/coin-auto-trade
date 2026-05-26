@@ -113,6 +113,11 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         "pyramid_state_partial_taken",
         "ALTER TABLE pyramid_state ADD COLUMN partial_taken INTEGER NOT NULL DEFAULT 0",
     ),
+    (
+        7,
+        "pyramid_state_highest_price",
+        "ALTER TABLE pyramid_state ADD COLUMN highest_price REAL NOT NULL DEFAULT 0",
+    ),
 ]
 
 

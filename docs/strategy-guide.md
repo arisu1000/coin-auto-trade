@@ -134,3 +134,45 @@ talib.CDLENGULFING(open, high, low, close)  # 장악형 패턴
 - 실시간 진입 시그널은 **마지막 행(`df.iloc[-1]`)**만 사용됩니다
 - 초기화 기간(warm-up)이 필요한 지표는 `NaN`이 포함됩니다 → `isnan` 체크 필수
 - 전략 내에서 직접 API 호출이나 주문을 하지 마세요 — 실행은 `Trader`가 담당합니다
+
+---
+
+## 피라미딩 전략 손절·트레일링 스탑 동작
+
+피라미딩 전략(`is_pyramid=True`)에서는 `_check_position_exit()`가 `generate_signals()` 결과와 독립적으로 손절·트레일링 스탑을 직접 판정합니다.
+
+### 비교 기준
+
+| 항목 | 기준값 | 이유 |
+|------|--------|------|
+| 최고가 갱신 | `max(현재가, 캔들 HIGH)` | 종가만 보면 intraday 고점을 놓침 |
+| 손절·트레일 비교 | 캔들 LOW (없으면 현재가) | 캔들 내 이탈도 즉시 감지하기 위함 |
+
+### 발동 조건
+
+```
+stop_threshold  = entry_price × (1 - stop_pct / 100)
+trail_threshold = highest × (1 - trail_pct / 100)
+
+캔들 LOW <= stop_threshold                          → SELL (손절)
+trail_threshold > entry_price
+  AND 캔들 LOW <= trail_threshold                   → SELL (트레일링 스탑)
+```
+
+트레일링 스탑은 `trail_threshold > entry_price`(수익권 진입 후)에만 발동합니다. 수익권 미진입 상태에서의 조기 청산을 방지하기 위함입니다.
+
+### 재시작 시 최고가 복원
+
+- `pyramid_state` 테이블의 `highest_price` 컬럼에서 복원합니다
+- 이전 버전 레코드(컬럼 값이 0)는 시작 시 캔들 히스토리 HIGH의 최대값으로 보정합니다
+
+### 전략에서 `stop_pct` / `trail_pct` 설정
+
+```python
+class MyStrategy(Strategy):
+    def __init__(self, stop_pct: float = 5.0, trail_pct: float = 8.0):
+        self.stop_pct = stop_pct    # 진입가 대비 손절 허용 낙폭(%)
+        self.trail_pct = trail_pct  # 최고가 대비 트레일 낙폭(%)
+```
+
+두 속성이 없으면 `Trader`가 기본값(각 10%)을 사용합니다.
