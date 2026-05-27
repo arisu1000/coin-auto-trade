@@ -359,14 +359,15 @@ class CommandHandlers:
                 parse_mode="HTML",
             )
 
+            # 현재 전략의 실제 파라미터를 기준으로 구성 (하드코딩 없음)
+            skip = {"name"}
             strategy_params = {
-                "unit_amount": getattr(strategy, "unit_amount", self._settings.pyramid_unit_amount),
-                "entry_pct":   getattr(strategy, "entry_pct",   self._settings.pyramid_entry_pct),
-                "add_pct":     getattr(strategy, "add_pct",     self._settings.pyramid_add_pct),
-                "stop_pct":    getattr(strategy, "stop_pct",    self._settings.pyramid_stop_pct),
-                "trail_pct":   getattr(strategy, "trail_pct",   self._settings.pyramid_trail_pct),
+                k: v for k, v in vars(strategy).items()
+                if not k.startswith("_") and k not in skip
             }
-            strategy_params.update(overrides)
+            # 모르는 키는 무시 (전략이 지원하지 않는 파라미터 전달 방지)
+            ignored = {k: v for k, v in overrides.items() if k not in strategy_params}
+            strategy_params.update({k: v for k, v in overrides.items() if k in strategy_params})
 
             temp_manager = StrategyManager(Path("src/strategy"))
             bt_strategy = temp_manager.load(strategy.name, params=strategy_params)
@@ -396,12 +397,15 @@ class CommandHandlers:
                     if isinstance(v, (int, float))
                 )
             cap_note = f"\n<i>⚠️ {raw_days}일 요청 → 최대 365일로 제한됨</i>" if days_capped else ""
+            ignored_note = ""
+            if ignored:
+                ignored_note = "\n<i>⚠️ 무시된 파라미터 (현재 전략 미지원): " + ", ".join(ignored.keys()) + "</i>"
 
             await progress_msg.edit_text(
                 f"📊 <b>백테스트 결과</b>\n\n"
                 f"전략: <code>{strategy.name}</code>\n"
                 f"마켓: <code>{market}</code>\n"
-                f"기간: {df.index[0].date()} ~ {df.index[-1].date()} ({candle_label}){override_text}{cap_note}\n\n"
+                f"기간: {df.index[0].date()} ~ {df.index[-1].date()} ({candle_label}){override_text}{cap_note}{ignored_note}\n\n"
                 f"{ret_emoji} 총 수익률: <b>{ret_pct:+.2f}%</b>\n"
                 f"💰 최종 자본: {final_cap:,.0f}원 (초기 {capital:,.0f}원)\n"
                 f"📉 최대 낙폭(MDD): {mdd:.2f}%\n"
