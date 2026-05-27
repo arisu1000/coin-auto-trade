@@ -219,6 +219,7 @@ class CommandHandlers:
                 f"📋 <b>백테스트 사용법</b>\n\n"
                 f"<code>/backtest [마켓] [일수] [파라미터=값 ...]</code>\n\n"
                 f"<b>공통 파라미터:</b>\n"
+                f"  <code>strategy</code>    — 백테스트 전략 (활성 전략 변경 없음)\n"
                 f"  <code>capital</code>     — 초기 자본금 원 (기본: unit_amount×10)\n\n"
                 f"<b>전략별 파라미터 (전략 파라미터는 오버라이드 가능):</b>\n"
                 f"  <b>pyramid_breakout</b>: entry_pct / add_pct / stop_pct / trail_pct / unit_amount\n"
@@ -229,7 +230,8 @@ class CommandHandlers:
                 f"<b>예시:</b>\n"
                 f"  <code>/backtest KRW-BTC 365</code>\n"
                 f"  <code>/backtest KRW-ETH 90 stop_pct=3 trail_pct=3</code>\n"
-                f"  <code>/backtest KRW-BTC 180 window=10 profit_pct=5 capital=1000000</code>"
+                f"  <code>/backtest KRW-BTC 365 strategy=breakout_n window=10 stop_pct=3</code>\n"
+                f"  <code>/backtest KRW-BTC 180 strategy=ma_cross fast_period=5 slow_period=20</code>"
                 f"{current}",
                 parse_mode="HTML",
             )
@@ -359,18 +361,24 @@ class CommandHandlers:
                 parse_mode="HTML",
             )
 
-            # 현재 전략의 실제 파라미터를 기준으로 구성 (하드코딩 없음)
+            # strategy=이름 으로 백테스트 전용 전략 지정 가능 (활성 전략 변경 없음)
+            temp_manager = StrategyManager(Path("src/strategy"))
+            bt_strategy_name = overrides.pop("strategy", strategy.name)
+            if isinstance(bt_strategy_name, float):
+                bt_strategy_name = strategy.name  # 숫자가 들어온 경우 무시
+
+            # 백테스트 전략 인스턴스 생성 (기본값 파악용)
+            bt_strategy_default = temp_manager.load(bt_strategy_name)
             skip = {"name"}
             strategy_params = {
-                k: v for k, v in vars(strategy).items()
+                k: v for k, v in vars(bt_strategy_default).items()
                 if not k.startswith("_") and k not in skip
             }
             # 모르는 키는 무시 (전략이 지원하지 않는 파라미터 전달 방지)
             ignored = {k: v for k, v in overrides.items() if k not in strategy_params}
             strategy_params.update({k: v for k, v in overrides.items() if k in strategy_params})
 
-            temp_manager = StrategyManager(Path("src/strategy"))
-            bt_strategy = temp_manager.load(strategy.name, params=strategy_params)
+            bt_strategy = temp_manager.load(bt_strategy_name, params=strategy_params)
 
             engine = BacktestEngine(
                 strategy=bt_strategy,
@@ -403,7 +411,9 @@ class CommandHandlers:
 
             await progress_msg.edit_text(
                 f"📊 <b>백테스트 결과</b>\n\n"
-                f"전략: <code>{strategy.name}</code>\n"
+                f"전략: <code>{bt_strategy_name}</code>"
+                + (f" <i>(활성: {strategy.name})</i>" if bt_strategy_name != strategy.name else "")
+                + "\n"
                 f"마켓: <code>{market}</code>\n"
                 f"기간: {df.index[0].date()} ~ {df.index[-1].date()} ({candle_label}){override_text}{cap_note}{ignored_note}\n\n"
                 f"{ret_emoji} 총 수익률: <b>{ret_pct:+.2f}%</b>\n"
