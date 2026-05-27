@@ -204,35 +204,32 @@ class CommandHandlers:
         if not args:
             strategy = self._strategy_manager.get_active() if self._strategy_manager else None
             if strategy:
-                current = (
-                    f"\n현재 전략: <code>{strategy.name}</code>\n"
-                    f"  entry_pct  = {getattr(strategy, 'entry_pct',  self._settings.pyramid_entry_pct)}\n"
-                    f"  add_pct    = {getattr(strategy, 'add_pct',    self._settings.pyramid_add_pct)}\n"
-                    f"  stop_pct   = {getattr(strategy, 'stop_pct',   self._settings.pyramid_stop_pct)}\n"
-                    f"  trail_pct  = {getattr(strategy, 'trail_pct',  self._settings.pyramid_trail_pct)}\n"
-                    f"  unit_amount= {getattr(strategy, 'unit_amount', self._settings.pyramid_unit_amount):,.0f}원"
+                # 전략 인스턴스의 실제 속성을 동적으로 나열
+                skip = {"name"}
+                param_lines = "\n".join(
+                    f"  <code>{k}</code> = {v}"
+                    for k, v in vars(strategy).items()
+                    if not k.startswith("_") and k not in skip
                 )
+                current = f"\n현재 전략: <code>{strategy.name}</code>\n{param_lines}"
             else:
                 current = "\n⚠️ 활성화된 전략 없음"
 
             await update.message.reply_text(
                 f"📋 <b>백테스트 사용법</b>\n\n"
                 f"<code>/backtest [마켓] [일수] [파라미터=값 ...]</code>\n\n"
-                f"<b>오버라이드 가능한 파라미터:</b>\n"
-                f"  <code>entry_pct</code>   — 진입 기준 상승률 (%)\n"
-                f"  <code>add_pct</code>     — 추가매수 간격 (%)\n"
-                f"  <code>stop_pct</code>    — 손절률 (%)\n"
-                f"  <code>trail_pct</code>   — 트레일링 스탑 (%)\n"
-                f"  <code>unit_amount</code> — 1회 투입 금액 (원)\n"
-                f"  <code>capital</code>     — 초기 자본금 (원, 기본: unit_amount×10)\n\n"
+                f"<b>공통 파라미터:</b>\n"
+                f"  <code>capital</code>     — 초기 자본금 원 (기본: unit_amount×10)\n\n"
+                f"<b>전략별 파라미터 (전략 파라미터는 오버라이드 가능):</b>\n"
+                f"  <b>pyramid_breakout</b>: entry_pct / add_pct / stop_pct / trail_pct / unit_amount\n"
+                f"  <b>breakout_n</b>:       window / stop_pct / profit_pct / trail_pct / unit_amount\n"
+                f"  <b>ma_cross</b>:         fast_period / slow_period / stop_pct / profit_pct / trail_pct / ma_exit / unit_amount\n\n"
                 f"<b>캔들 단위 자동 선택:</b>\n"
-                f"  7~30일 → 60분봉\n"
-                f"  31~90일 → 4시간봉\n"
-                f"  91~365일 → 일봉\n\n"
+                f"  7~30일 → 60분봉 | 31~90일 → 4시간봉 | 91~365일 → 일봉\n\n"
                 f"<b>예시:</b>\n"
                 f"  <code>/backtest KRW-BTC 365</code>\n"
-                f"  <code>/backtest KRW-ETH 90 trail_pct=8 stop_pct=5</code>\n"
-                f"  <code>/backtest KRW-BTC 180 capital=1000000</code>"
+                f"  <code>/backtest KRW-ETH 90 stop_pct=3 trail_pct=3</code>\n"
+                f"  <code>/backtest KRW-BTC 180 window=10 profit_pct=5 capital=1000000</code>"
                 f"{current}",
                 parse_mode="HTML",
             )
@@ -710,30 +707,44 @@ class CommandHandlers:
             )
 
     async def cmd_set_param(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """피라미딩 전략 파라미터 즉시 변경 (재시작 전까지 유효).
+        """전략 파라미터 즉시 변경 (재시작 전까지 유효).
         사용법: /set_param [파라미터] [값]
         """
+        if not self._strategy_manager:
+            await update.message.reply_text("❌ 전략 매니저 미연결")
+            return
+
+        strategy = self._strategy_manager.get_active()
+        if not strategy:
+            await update.message.reply_text("❌ 활성화된 전략이 없습니다.")
+            return
+
+        # 현재 전략의 파라미터 목록을 동적으로 파악
+        skip = {"name"}
+        current = {
+            k: v for k, v in vars(strategy).items()
+            if not k.startswith("_") and k not in skip
+        }
+
         args = context.args or []
         if len(args) != 2:
+            param_list = "\n".join(
+                f"  <code>{k}</code> = {v}" for k, v in current.items()
+            )
             await update.message.reply_text(
-                "사용법: <code>/set_param [파라미터] [값]</code>\n\n"
-                "변경 가능한 파라미터:\n"
-                "  <code>trail_pct</code>   — 트레일링 스탑 (%)\n"
-                "  <code>stop_pct</code>    — 손절 (%)\n"
-                "  <code>add_pct</code>     — 추가매수 간격 (%)\n"
-                "  <code>entry_pct</code>   — 진입 기준 (%)\n"
-                "  <code>unit_amount</code> — 1회 투입 금액 (원)\n\n"
-                "예) <code>/set_param trail_pct 5</code>",
+                f"사용법: <code>/set_param [파라미터] [값]</code>\n\n"
+                f"현재 전략 <b>{strategy.name}</b> 파라미터:\n"
+                f"{param_list}\n\n"
+                f"예) <code>/set_param trail_pct 3</code>",
                 parse_mode="HTML",
             )
             return
 
         param = args[0].lower()
-        valid_params = {"trail_pct", "stop_pct", "add_pct", "entry_pct", "unit_amount"}
-        if param not in valid_params:
+        if param not in current:
             await update.message.reply_text(
                 f"❌ 알 수 없는 파라미터: <code>{param}</code>\n"
-                f"변경 가능: {', '.join(sorted(valid_params))}",
+                f"변경 가능: {', '.join(sorted(current.keys()))}",
                 parse_mode="HTML",
             )
             return
@@ -744,22 +755,6 @@ class CommandHandlers:
             await update.message.reply_text("❌ 값이 올바르지 않습니다. 숫자를 입력하세요.")
             return
 
-        if not self._strategy_manager:
-            await update.message.reply_text("❌ 전략 매니저 미연결")
-            return
-
-        strategy = self._strategy_manager.get_active()
-        if not strategy or "pyramid" not in strategy.name:
-            await update.message.reply_text("❌ 현재 피라미딩 전략이 활성화되어 있지 않습니다.")
-            return
-
-        current = {
-            "unit_amount": getattr(strategy, "unit_amount", self._settings.pyramid_unit_amount),
-            "entry_pct":   getattr(strategy, "entry_pct",   self._settings.pyramid_entry_pct),
-            "add_pct":     getattr(strategy, "add_pct",     self._settings.pyramid_add_pct),
-            "stop_pct":    getattr(strategy, "stop_pct",    self._settings.pyramid_stop_pct),
-            "trail_pct":   getattr(strategy, "trail_pct",   self._settings.pyramid_trail_pct),
-        }
         old_value = current[param]
         current[param] = value
 
@@ -769,18 +764,11 @@ class CommandHandlers:
             await update.message.reply_text(f"❌ 파라미터 변경 실패: {e}")
             return
 
-        labels = {
-            "trail_pct":   "트레일링 스탑",
-            "stop_pct":    "손절",
-            "add_pct":     "추가매수 간격",
-            "entry_pct":   "진입 기준",
-            "unit_amount": "1회 투입 금액",
-        }
-        unit = "원" if param == "unit_amount" else "%"
+        unit = "원" if param == "unit_amount" else ""
         await update.message.reply_text(
-            f"✅ <b>{labels[param]} 변경 완료</b>\n\n"
-            f"{old_value:,.0f}{unit} → <b>{value:,.0f}{unit}</b>\n\n"
-            f"<i>⚠️ 재시작 시 .env 값으로 초기화됩니다.</i>",
+            f"✅ <b>{strategy.name} / {param} 변경 완료</b>\n\n"
+            f"{old_value:g}{unit} → <b>{value:g}{unit}</b>\n\n"
+            f"<i>⚠️ 재시작 시 초기값으로 돌아갑니다.</i>",
             parse_mode="HTML",
         )
 
