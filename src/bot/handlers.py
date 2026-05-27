@@ -225,8 +225,24 @@ class CommandHandlers:
                 except ValueError:
                     overrides[key.strip()] = val.strip()
 
-        days = max(7, min(days, 60))
+        days = max(7, min(days, 365))
         capital = float(overrides.pop("capital", self._settings.pyramid_unit_amount * 10))
+
+        # 기간에 따라 캔들 단위 자동 선택 (API 호출 수 최소화)
+        if days <= 30:
+            candle_unit = 60    # 60분봉
+            candle_label = "60분봉"
+            target_count = days * 24
+            use_daily = False
+        elif days <= 90:
+            candle_unit = 240   # 4시간봉
+            candle_label = "4시간봉"
+            target_count = days * 6
+            use_daily = False
+        else:
+            candle_label = "일봉"
+            target_count = days
+            use_daily = True
 
         if not self._strategy_manager:
             await update.message.reply_text("❌ 전략 매니저 미연결")
@@ -240,7 +256,7 @@ class CommandHandlers:
             return
 
         progress_msg = await update.message.reply_text(
-            f"⏳ <b>{strategy.name}</b> | <code>{market}</code> | {days}일\n"
+            f"⏳ <b>{strategy.name}</b> | <code>{market}</code> | {days}일 ({candle_label})\n"
             f"캔들 데이터 수집 중...",
             parse_mode="HTML",
         )
@@ -251,12 +267,14 @@ class CommandHandlers:
                 return
 
             client = self._trader._upbit
-            target_count = days * 24  # 60분봉 기준
             all_candles = []
             to_param = None
 
             while len(all_candles) < target_count:
-                batch = await client.get_candles_minutes(market, unit=60, count=200, to=to_param)
+                if use_daily:
+                    batch = await client.get_candles_days(market, count=200, to=to_param)
+                else:
+                    batch = await client.get_candles_minutes(market, unit=candle_unit, count=200, to=to_param)
                 if not batch:
                     break
                 all_candles.extend(batch)
@@ -280,7 +298,7 @@ class CommandHandlers:
             df = df[~df.index.duplicated(keep="first")]
 
             await progress_msg.edit_text(
-                f"⏳ <b>{strategy.name}</b> | <code>{market}</code> | {days}일\n"
+                f"⏳ <b>{strategy.name}</b> | <code>{market}</code> | {days}일 ({candle_label})\n"
                 f"백테스트 실행 중 ({len(df):,}개 캔들)...",
                 parse_mode="HTML",
             )
@@ -325,7 +343,7 @@ class CommandHandlers:
                 f"📊 <b>백테스트 결과</b>\n\n"
                 f"전략: <code>{strategy.name}</code>\n"
                 f"마켓: <code>{market}</code>\n"
-                f"기간: {df.index[0].date()} ~ {df.index[-1].date()}{override_text}\n\n"
+                f"기간: {df.index[0].date()} ~ {df.index[-1].date()} ({candle_label}){override_text}\n\n"
                 f"{ret_emoji} 총 수익률: <b>{ret_pct:+.2f}%</b>\n"
                 f"💰 최종 자본: {final_cap:,.0f}원 (초기 {capital:,.0f}원)\n"
                 f"📉 최대 낙폭(MDD): {mdd:.2f}%\n"
