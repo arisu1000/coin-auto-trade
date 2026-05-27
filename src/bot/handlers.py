@@ -200,6 +200,44 @@ class CommandHandlers:
 
         args = context.args or []
 
+        # 인수 없으면 파라미터 안내 출력
+        if not args:
+            strategy = self._strategy_manager.get_active() if self._strategy_manager else None
+            if strategy:
+                current = (
+                    f"\n현재 전략: <code>{strategy.name}</code>\n"
+                    f"  entry_pct  = {getattr(strategy, 'entry_pct',  self._settings.pyramid_entry_pct)}\n"
+                    f"  add_pct    = {getattr(strategy, 'add_pct',    self._settings.pyramid_add_pct)}\n"
+                    f"  stop_pct   = {getattr(strategy, 'stop_pct',   self._settings.pyramid_stop_pct)}\n"
+                    f"  trail_pct  = {getattr(strategy, 'trail_pct',  self._settings.pyramid_trail_pct)}\n"
+                    f"  unit_amount= {getattr(strategy, 'unit_amount', self._settings.pyramid_unit_amount):,.0f}원"
+                )
+            else:
+                current = "\n⚠️ 활성화된 전략 없음"
+
+            await update.message.reply_text(
+                f"📋 <b>백테스트 사용법</b>\n\n"
+                f"<code>/backtest [마켓] [일수] [파라미터=값 ...]</code>\n\n"
+                f"<b>오버라이드 가능한 파라미터:</b>\n"
+                f"  <code>entry_pct</code>   — 진입 기준 상승률 (%)\n"
+                f"  <code>add_pct</code>     — 추가매수 간격 (%)\n"
+                f"  <code>stop_pct</code>    — 손절률 (%)\n"
+                f"  <code>trail_pct</code>   — 트레일링 스탑 (%)\n"
+                f"  <code>unit_amount</code> — 1회 투입 금액 (원)\n"
+                f"  <code>capital</code>     — 초기 자본금 (원, 기본: unit_amount×10)\n\n"
+                f"<b>캔들 단위 자동 선택:</b>\n"
+                f"  7~30일 → 60분봉\n"
+                f"  31~90일 → 4시간봉\n"
+                f"  91~365일 → 일봉\n\n"
+                f"<b>예시:</b>\n"
+                f"  <code>/backtest KRW-BTC 365</code>\n"
+                f"  <code>/backtest KRW-ETH 90 trail_pct=8 stop_pct=5</code>\n"
+                f"  <code>/backtest KRW-BTC 180 capital=1000000</code>"
+                f"{current}",
+                parse_mode="HTML",
+            )
+            return
+
         # 인수 파싱: [마켓] [일수] [key=val ...]
         market = "KRW-BTC"
         days = 30
