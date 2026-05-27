@@ -40,7 +40,7 @@ class CommandHandlers:
             f"/halt - 매매 중단 (킬스위치)\n"
             f"/resume [마켓] - 매매 재개 (마켓 지정 시 해당 마켓 킬스위치만 해제)\n"
             f"/strategy [이름] - 전략 변경\n"
-            f"/backtest [전략] [일수] - 백테스트 실행\n\n"
+            f"/backtest [마켓] [일수] [param=val ...] - 백테스트 실행\n\n"
             f"<b>피라미딩 동기화</b>\n"
             f"/sync - 업비트 잔고 기준 상태 동기화\n"
             f"/pyramid_set [마켓] [진입가] [횟수] - 상태 수동 설정\n\n"
@@ -185,17 +185,161 @@ class CommandHandlers:
             await update.message.reply_text(f"❌ 전략 변경 실패: {e}")
 
     async def cmd_backtest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """백테스트 실행"""
-        args = context.args or []
-        strategy_name = args[0] if args else self._settings.default_strategy
-        days = int(args[1]) if len(args) > 1 else 30
+        """백테스트 실행
+        사용법: /backtest [마켓] [일수] [param=value ...]
+        예) /backtest KRW-BTC 30
+            /backtest KRW-BTC 14 trail_pct=8 stop_pct=5 capital=2000000
+        """
+        import asyncio
+        import pandas as pd
+        from pathlib import Path
+        from src.backtest.engine import BacktestEngine
+        from src.backtest.fees import FeeSchedule
+        from src.backtest.slippage import ConservativeSlippage
+        from src.strategy.manager import StrategyManager
 
-        await update.message.reply_text(
-            f"⏳ <b>{strategy_name}</b> 전략으로 {days}일 백테스트 실행 중...",
+        args = context.args or []
+
+        # 인수 파싱: [마켓] [일수] [key=val ...]
+        market = "KRW-BTC"
+        days = 30
+        idx = 0
+
+        if args and args[0].upper().startswith("KRW-"):
+            market = args[0].upper()
+            idx = 1
+
+        if idx < len(args):
+            try:
+                days = int(args[idx])
+                idx += 1
+            except ValueError:
+                pass
+
+        overrides: dict = {}
+        for item in args[idx:]:
+            if "=" in item:
+                key, _, val = item.partition("=")
+                try:
+                    overrides[key.strip()] = float(val.strip())
+                except ValueError:
+                    overrides[key.strip()] = val.strip()
+
+        days = max(7, min(days, 60))
+        capital = float(overrides.pop("capital", self._settings.pyramid_unit_amount * 10))
+
+        if not self._strategy_manager:
+            await update.message.reply_text("❌ 전략 매니저 미연결")
+            return
+
+        strategy = self._strategy_manager.get_active()
+        if not strategy:
+            await update.message.reply_text(
+                "❌ 활성화된 전략이 없습니다.\n/strategy [이름]으로 먼저 전략을 선택하세요."
+            )
+            return
+
+        progress_msg = await update.message.reply_text(
+            f"⏳ <b>{strategy.name}</b> | <code>{market}</code> | {days}일\n"
+            f"캔들 데이터 수집 중...",
             parse_mode="HTML",
         )
-        # 실제 백테스트는 별도 태스크로 실행
-        await update.message.reply_text("🚧 백테스트 기능 준비 중입니다.")
+
+        try:
+            if not self._trader or not self._trader._upbit:
+                await progress_msg.edit_text("❌ 업비트 클라이언트 미연결")
+                return
+
+            client = self._trader._upbit
+            target_count = days * 24  # 60분봉 기준
+            all_candles = []
+            to_param = None
+
+            while len(all_candles) < target_count:
+                batch = await client.get_candles_minutes(market, unit=60, count=200, to=to_param)
+                if not batch:
+                    break
+                all_candles.extend(batch)
+                to_param = batch[-1].timestamp.strftime("%Y-%m-%dT%H:%M:%S")
+                await asyncio.sleep(0.12)
+
+            if not all_candles:
+                await progress_msg.edit_text(f"❌ {market} 캔들 데이터를 가져오지 못했습니다.")
+                return
+
+            data = [
+                {
+                    "timestamp": c.timestamp,
+                    "open": c.open, "high": c.high, "low": c.low,
+                    "close": c.close, "volume": c.volume,
+                }
+                for c in all_candles
+            ]
+            df = pd.DataFrame(data).set_index("timestamp").sort_index()
+            df.index = pd.to_datetime(df.index, utc=True)
+            df = df[~df.index.duplicated(keep="first")]
+
+            await progress_msg.edit_text(
+                f"⏳ <b>{strategy.name}</b> | <code>{market}</code> | {days}일\n"
+                f"백테스트 실행 중 ({len(df):,}개 캔들)...",
+                parse_mode="HTML",
+            )
+
+            strategy_params = {
+                "unit_amount": getattr(strategy, "unit_amount", self._settings.pyramid_unit_amount),
+                "entry_pct":   getattr(strategy, "entry_pct",   self._settings.pyramid_entry_pct),
+                "add_pct":     getattr(strategy, "add_pct",     self._settings.pyramid_add_pct),
+                "stop_pct":    getattr(strategy, "stop_pct",    self._settings.pyramid_stop_pct),
+                "trail_pct":   getattr(strategy, "trail_pct",   self._settings.pyramid_trail_pct),
+            }
+            strategy_params.update(overrides)
+
+            temp_manager = StrategyManager(Path("src/strategy"))
+            bt_strategy = temp_manager.load(strategy.name, params=strategy_params)
+
+            engine = BacktestEngine(
+                strategy=bt_strategy,
+                slippage=ConservativeSlippage(),
+                fee=FeeSchedule(rate_bps=self._settings.default_fee_bps),
+            )
+            result = engine.run(df, initial_capital=capital)
+
+            s = result.report.summary()
+            ret_pct       = s.get("total_return_pct", 0)
+            mdd           = s.get("max_drawdown_pct", 0)
+            sharpe        = s.get("sharpe_ratio", 0)
+            profit_factor = s.get("profit_factor", 0)
+            win_rate      = s.get("win_rate_pct", 0)
+            total_trades  = s.get("total_trades", 0)
+            avg_pnl       = s.get("avg_pnl_per_trade", 0)
+            final_cap     = s.get("final_capital", capital)
+
+            ret_emoji = "📈" if ret_pct >= 0 else "📉"
+            override_text = ""
+            if overrides:
+                override_text = "\n파라미터: " + " / ".join(
+                    f"<code>{k}={v}</code>" for k, v in overrides.items()
+                )
+
+            await progress_msg.edit_text(
+                f"📊 <b>백테스트 결과</b>\n\n"
+                f"전략: <code>{strategy.name}</code>\n"
+                f"마켓: <code>{market}</code>\n"
+                f"기간: {df.index[0].date()} ~ {df.index[-1].date()}{override_text}\n\n"
+                f"{ret_emoji} 총 수익률: <b>{ret_pct:+.2f}%</b>\n"
+                f"💰 최종 자본: {final_cap:,.0f}원 (초기 {capital:,.0f}원)\n"
+                f"📉 최대 낙폭(MDD): {mdd:.2f}%\n"
+                f"📐 샤프 비율: {sharpe:.2f}\n"
+                f"⚡ 프로핏 팩터: {profit_factor:.2f}\n\n"
+                f"🎯 승률: {win_rate:.1f}%\n"
+                f"📋 총 거래: {total_trades}회\n"
+                f"💵 평균 손익/거래: {avg_pnl:+,.0f}원",
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+            logger.error("backtest_failed", error=str(e))
+            await progress_msg.edit_text(f"❌ 백테스트 실패: {e}")
 
     async def cmd_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """최근 로그 조회"""
