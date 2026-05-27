@@ -254,16 +254,32 @@ class CommandHandlers:
             except ValueError:
                 pass
 
+        # key=value 및 key value 두 형식 모두 지원
         overrides: dict = {}
-        for item in args[idx:]:
-            if "=" in item:
-                key, _, val = item.partition("=")
+        remaining = args[idx:]
+        i = 0
+        while i < len(remaining):
+            token = remaining[i]
+            if "=" in token:
+                key, _, val_str = token.partition("=")
                 try:
-                    overrides[key.strip()] = float(val.strip())
+                    overrides[key.strip()] = float(val_str.strip())
                 except ValueError:
-                    overrides[key.strip()] = val.strip()
+                    overrides[key.strip()] = val_str.strip()
+                i += 1
+            elif i + 1 < len(remaining):
+                key = token
+                try:
+                    overrides[key] = float(remaining[i + 1])
+                    i += 2
+                except ValueError:
+                    i += 1
+            else:
+                i += 1
 
+        raw_days = days
         days = max(7, min(days, 365))
+        days_capped = raw_days > 365
         capital = float(overrides.pop("capital", self._settings.pyramid_unit_amount * 10))
 
         # 기간에 따라 캔들 단위 자동 선택 (API 호출 수 최소화)
@@ -379,14 +395,16 @@ class CommandHandlers:
             override_text = ""
             if overrides:
                 override_text = "\n파라미터: " + " / ".join(
-                    f"<code>{k}={v}</code>" for k, v in overrides.items()
+                    f"<code>{k}={v:g}</code>" for k, v in overrides.items()
+                    if isinstance(v, (int, float))
                 )
+            cap_note = f"\n<i>⚠️ {raw_days}일 요청 → 최대 365일로 제한됨</i>" if days_capped else ""
 
             await progress_msg.edit_text(
                 f"📊 <b>백테스트 결과</b>\n\n"
                 f"전략: <code>{strategy.name}</code>\n"
                 f"마켓: <code>{market}</code>\n"
-                f"기간: {df.index[0].date()} ~ {df.index[-1].date()} ({candle_label}){override_text}\n\n"
+                f"기간: {df.index[0].date()} ~ {df.index[-1].date()} ({candle_label}){override_text}{cap_note}\n\n"
                 f"{ret_emoji} 총 수익률: <b>{ret_pct:+.2f}%</b>\n"
                 f"💰 최종 자본: {final_cap:,.0f}원 (초기 {capital:,.0f}원)\n"
                 f"📉 최대 낙폭(MDD): {mdd:.2f}%\n"
