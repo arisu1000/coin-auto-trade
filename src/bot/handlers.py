@@ -262,24 +262,29 @@ class CommandHandlers:
         )
 
         try:
-            if not self._trader or not self._trader._upbit:
-                await progress_msg.edit_text("❌ 업비트 클라이언트 미연결")
-                return
+            from datetime import timedelta
+            from src.exchange.upbit_client import UpbitClient
 
-            client = self._trader._upbit
-            all_candles = []
-            to_param = None
+            # 실시간 매매 루프의 rate limit 버킷과 경합하지 않도록 전용 클라이언트 사용
+            async with UpbitClient(self._settings) as client:
+                all_candles = []
+                to_param = None
 
-            while len(all_candles) < target_count:
-                if use_daily:
-                    batch = await client.get_candles_days(market, count=200, to=to_param)
-                else:
-                    batch = await client.get_candles_minutes(market, unit=candle_unit, count=200, to=to_param)
-                if not batch:
-                    break
-                all_candles.extend(batch)
-                to_param = batch[-1].timestamp.strftime("%Y-%m-%dT%H:%M:%S")
-                await asyncio.sleep(0.12)
+                while len(all_candles) < target_count:
+                    if use_daily:
+                        batch = await client.get_candles_days(market, count=200, to=to_param)
+                    else:
+                        batch = await client.get_candles_minutes(
+                            market, unit=candle_unit, count=200, to=to_param
+                        )
+                    if not batch:
+                        break
+                    all_candles.extend(batch)
+                    # 마지막 캔들 시각에서 1단위 이전으로 to_param 설정 (중복 방지)
+                    last_ts = batch[-1].timestamp
+                    step = timedelta(days=1) if use_daily else timedelta(minutes=candle_unit)
+                    to_param = (last_ts - step).strftime("%Y-%m-%dT%H:%M:%S")
+                    await asyncio.sleep(0.2)  # Quotation API: 9 rps, 여유 있게 설정
 
             if not all_candles:
                 await progress_msg.edit_text(f"❌ {market} 캔들 데이터를 가져오지 못했습니다.")
