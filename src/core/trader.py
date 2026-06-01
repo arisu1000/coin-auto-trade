@@ -563,11 +563,7 @@ class Trader:
                 # 피라미딩 상태 자동 정리: 잔고 없는 종목 제거
                 stale = [m for m in list(self._pyramid_state) if m not in self._held_markets]
                 for market in stale:
-                    self._pyramid_state.pop(market, None)
-                    self._position_highest.pop(market, None)
-                    self._position_entry_ts.pop(market, None)
-                    if self._pyramid_repo:
-                        await self._pyramid_repo.delete(market)
+                    await self._forget_position(market)
                     logger.info("pyramid_state_auto_cleaned", market=market)
 
                 # 거래지원 종료 예정 마켓 감시 및 자동 포지션 정리
@@ -695,7 +691,7 @@ class Trader:
                     self._pyramid_state[market] = {"entry_price": current_price, "add_count": 0}
                     self._position_highest[market] = current_price  # 신규 진입
                     # 진입 봉 intraday 배제용 진입 시각 기록 (naive UTC)
-                    self._position_entry_ts[market] = datetime.now(timezone.utc).replace(tzinfo=None)
+                    self._stamp_entry_ts(market)
                     # 신규 진입 시 쿨다운 해제
                     self._sell_cooldown.pop(market, None)
                     if self._pyramid_repo:
@@ -765,11 +761,7 @@ class Trader:
                         )
 
                 # 피라미딩 상태 초기화 및 DB 삭제
-                self._pyramid_state.pop(market, None)
-                self._position_highest.pop(market, None)
-                self._position_entry_ts.pop(market, None)
-                if self._pyramid_repo:
-                    await self._pyramid_repo.delete(market)
+                await self._forget_position(market)
 
                 # 매도 후 재진입 쿨다운 기록
                 now = datetime.now(timezone.utc)
@@ -828,11 +820,7 @@ class Trader:
         # 잔고 없는데 state 있으면 제거
         for market in list(self._pyramid_state):
             if market not in held:
-                self._pyramid_state.pop(market)
-                self._position_highest.pop(market, None)
-                self._position_entry_ts.pop(market, None)
-                if self._pyramid_repo:
-                    await self._pyramid_repo.delete(market)
+                await self._forget_position(market)
                 removed.append(market)
 
         # 잔고 있는데 state 없으면 avg_buy_price로 초기화
@@ -843,9 +831,12 @@ class Trader:
                     "add_count": 0,
                 }
                 self._position_highest[market] = bal.avg_buy_price
+                # 동기화 시점을 진입 시각으로 기록 → 동기화 직후 진입 봉 휩쏘 방지
+                entry_ts_iso = self._stamp_entry_ts(market)
                 if self._pyramid_repo:
                     await self._pyramid_repo.save(market, bal.avg_buy_price, 0,
-                                                  highest_price=bal.avg_buy_price)
+                                                  highest_price=bal.avg_buy_price,
+                                                  entry_ts=entry_ts_iso)
                 added.append(f"{market}@{bal.avg_buy_price:,.0f}")
 
         logger.info("pyramid_state_synced", removed=removed, added=added)
@@ -855,11 +846,36 @@ class Trader:
         """피라미딩 상태 수동 설정 (/pyramid_set 명령)"""
         self._pyramid_state[market] = {"entry_price": entry_price, "add_count": add_count, "partial_taken": False}
         self._position_highest[market] = entry_price
+        # 수동 등록 시점을 진입 시각으로 기록 → 등록 직후 진입 봉 휩쏘 방지
+        entry_ts_iso = self._stamp_entry_ts(market)
         if self._pyramid_repo:
             await self._pyramid_repo.save(market, entry_price, add_count, partial_taken=False,
-                                          highest_price=entry_price)
+                                          highest_price=entry_price, entry_ts=entry_ts_iso)
         logger.info("pyramid_state_manual_set", market=market,
                     entry_price=entry_price, add_count=add_count)
+
+    def _stamp_entry_ts(self, market: str) -> str:
+        """진입 시각을 현재(naive UTC)로 기록하고 ISO 문자열을 반환한다.
+
+        진입 봉 intraday 배제 판정(_check_position_exit)의 기준 시각이 된다.
+        실제 진입 시각을 알 수 없는 동기화·수동 등록도 '지금'으로 보수적으로 기록해,
+        현재 진행 중인 봉(시작 시각이 지금보다 앞섬)의 고저가를 배제한다.
+        """
+        ts = datetime.now(timezone.utc).replace(tzinfo=None)
+        self._position_entry_ts[market] = ts
+        return ts.isoformat()
+
+    async def _forget_position(self, market: str) -> None:
+        """포지션 종료 시 관련 메모리 상태와 DB 레코드를 일괄 정리한다.
+
+        _pyramid_state·_position_highest·_position_entry_ts를 함께 비우고
+        pyramid_state DB 레코드를 삭제한다. (재진입 쿨다운은 호출부에서 별도 관리)
+        """
+        self._pyramid_state.pop(market, None)
+        self._position_highest.pop(market, None)
+        self._position_entry_ts.pop(market, None)
+        if self._pyramid_repo:
+            await self._pyramid_repo.delete(market)
 
     def _check_position_exit(
         self,
