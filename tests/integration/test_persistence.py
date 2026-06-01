@@ -8,6 +8,7 @@ import pytest
 from src.persistence.repositories.checkpoints import CheckpointRepository
 from src.persistence.repositories.logs import LogRepository
 from src.persistence.repositories.portfolio import PortfolioRepository
+from src.persistence.repositories.pyramid_state import PyramidStateRepository
 from src.persistence.repositories.trades import TradeRepository
 
 
@@ -127,3 +128,36 @@ class TestCheckpointRepository:
         await repo.save("thread_001", {"data": "test"})
         await repo.delete("thread_001")
         assert await repo.load("thread_001") is None
+
+
+class TestPyramidStateRepository:
+    async def test_save_and_load_with_entry_ts(self, db):
+        repo = PyramidStateRepository(db)
+        await repo.save(
+            "KRW-AERGO", entry_price=87.0, add_count=0,
+            highest_price=87.0, entry_ts="2026-06-01T10:14:00",
+        )
+        loaded = await repo.load_all()
+        assert "KRW-AERGO" in loaded
+        assert loaded["KRW-AERGO"]["entry_ts"] == "2026-06-01T10:14:00"
+        assert loaded["KRW-AERGO"]["highest_price"] == pytest.approx(87.0)
+
+    async def test_entry_ts_none_when_not_provided(self, db):
+        """entry_ts 미지정 시 None으로 저장된다(수동 등록·이전 레코드)."""
+        repo = PyramidStateRepository(db)
+        await repo.save("KRW-XRP", entry_price=700.0, add_count=0)
+        loaded = await repo.load_all()
+        assert loaded["KRW-XRP"]["entry_ts"] is None
+
+    async def test_entry_ts_preserved_on_update_without_value(self, db):
+        """최고가 갱신 등 entry_ts를 모르는 후속 save가 진입 시각을 지우지 않는다(COALESCE)."""
+        repo = PyramidStateRepository(db)
+        await repo.save(
+            "KRW-AERGO", entry_price=87.0, add_count=0,
+            highest_price=87.0, entry_ts="2026-06-01T10:14:00",
+        )
+        # entry_ts 없이 highest_price만 갱신
+        await repo.save("KRW-AERGO", entry_price=87.0, add_count=0, highest_price=95.0)
+        loaded = await repo.load_all()
+        assert loaded["KRW-AERGO"]["entry_ts"] == "2026-06-01T10:14:00"
+        assert loaded["KRW-AERGO"]["highest_price"] == pytest.approx(95.0)

@@ -118,6 +118,13 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         "pyramid_state_highest_price",
         "ALTER TABLE pyramid_state ADD COLUMN highest_price REAL NOT NULL DEFAULT 0",
     ),
+    (
+        8,
+        "pyramid_state_entry_ts",
+        # 신규 진입 시각(naive UTC ISO). 진입 봉 intraday 배제 판정용.
+        # NULL이면 진입 시각 미상(이전 버전 레코드/수동 등록) → intraday 그대로 사용.
+        "ALTER TABLE pyramid_state ADD COLUMN entry_ts TEXT",
+    ),
 ]
 
 

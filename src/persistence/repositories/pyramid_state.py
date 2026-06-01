@@ -21,19 +21,23 @@ class PyramidStateRepository:
         add_count: int,
         partial_taken: bool = False,
         highest_price: float = 0.0,
+        entry_ts: str | None = None,
     ) -> None:
+        # entry_ts가 None이면 기존 값을 보존(COALESCE)한다. 최고가·부분익절 갱신 등
+        # entry_ts를 모르는 호출부가 진입 시각을 지우지 않도록 하기 위함.
         await self._db.execute(
             """
-            INSERT INTO pyramid_state(market, entry_price, add_count, partial_taken, highest_price, updated_at)
-            VALUES(?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            INSERT INTO pyramid_state(market, entry_price, add_count, partial_taken, highest_price, entry_ts, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             ON CONFLICT(market) DO UPDATE SET
                 entry_price   = excluded.entry_price,
                 add_count     = excluded.add_count,
                 partial_taken = excluded.partial_taken,
                 highest_price = excluded.highest_price,
+                entry_ts      = COALESCE(excluded.entry_ts, pyramid_state.entry_ts),
                 updated_at    = excluded.updated_at
             """,
-            (market, entry_price, add_count, int(partial_taken), highest_price),
+            (market, entry_price, add_count, int(partial_taken), highest_price, entry_ts),
         )
         await self._db._conn.commit()
 
@@ -42,9 +46,9 @@ class PyramidStateRepository:
         await self._db._conn.commit()
 
     async def load_all(self) -> dict[str, dict]:
-        """저장된 전체 상태를 {market: {entry_price, add_count, partial_taken, highest_price}} 형태로 반환"""
+        """저장된 전체 상태를 {market: {entry_price, add_count, partial_taken, highest_price, entry_ts}} 형태로 반환"""
         rows = await self._db.fetchall(
-            "SELECT market, entry_price, add_count, partial_taken, highest_price FROM pyramid_state"
+            "SELECT market, entry_price, add_count, partial_taken, highest_price, entry_ts FROM pyramid_state"
         )
         return {
             row["market"]: {
@@ -52,6 +56,7 @@ class PyramidStateRepository:
                 "add_count": row["add_count"],
                 "partial_taken": bool(row["partial_taken"]),
                 "highest_price": row["highest_price"] or 0.0,
+                "entry_ts": row["entry_ts"],  # ISO 문자열 또는 None
             }
             for row in rows
         }

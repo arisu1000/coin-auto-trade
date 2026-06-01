@@ -143,6 +143,14 @@ class Trader:
                 m: (s.get("highest_price") or s["entry_price"])
                 for m, s in self._pyramid_state.items()
             }
+            # 진입 시각 복원: 재시작 직후에도 진입 봉 intraday 배제가 유지되도록 한다.
+            for m, s in self._pyramid_state.items():
+                ts_iso = s.get("entry_ts")
+                if ts_iso:
+                    try:
+                        self._position_entry_ts[m] = datetime.fromisoformat(ts_iso)
+                    except ValueError:
+                        logger.warning("entry_ts_parse_failed", market=m, value=ts_iso)
         cooldowns_raw = await self._pyramid_repo.load_cooldowns()
         self._sell_cooldown = {
             m: datetime.fromisoformat(ts)
@@ -699,10 +707,12 @@ class Trader:
                         self._position_highest[market] = current_price
                 if self._pyramid_repo:
                     s = self._pyramid_state[market]
+                    entry_ts = self._position_entry_ts.get(market)
                     await self._pyramid_repo.save(
                         market, s["entry_price"], s["add_count"],
                         partial_taken=s.get("partial_taken", False),
                         highest_price=self._position_highest.get(market, s["entry_price"]),
+                        entry_ts=entry_ts.isoformat() if entry_ts else None,
                     )
 
                 if self._bot:
