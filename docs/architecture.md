@@ -165,13 +165,20 @@ candle_cache.get_missing_range()
     avg_price   = 실제 평균단가 (DB에서 복원 또는 수동 설정)
     candle_high = 해당 캔들의 고가 (intraday 고점 반영)
     candle_low  = 해당 캔들의 저가 (intraday 이탈 감지)
+    candle_ts   = 해당 캔들의 시작 시각 (진입 봉 판별)
 
-    highest = max(_position_highest[market], current_price, candle_high)
+    # 진입 봉 intraday 배제: 봉 시작 시각이 진입 시각 이전이면(= 진입 전 가격을
+    # 고저가에 포함) candle_high/low를 무시하고 현재가만 사용한다.
+    bar_after_entry = (entry_ts is None) or (candle_ts >= entry_ts)
+    eff_high = candle_high if bar_after_entry else None
+    eff_low  = candle_low  if bar_after_entry else None
+
+    highest = max(_position_highest[market], current_price, eff_high)
     _position_highest[market] = highest  ← DB에도 즉시 저장
 
     stop_threshold  = avg_price × (1 - stop_pct / 100)
     trail_threshold = highest × (1 - trail_pct / 100)
-    check_price = candle_low (없으면 current_price)
+    check_price = eff_low (없으면 current_price)
 
     check_price <= stop_threshold            → SELL (손절)
     trail_threshold > avg_price
@@ -183,6 +190,7 @@ candle_cache.get_missing_range()
 - 트레일링 스탑은 `trail_threshold > avg_price`일 때만 발동합니다. 포지션이 아직 수익권에 진입하지 않은 상태에서 최고가 기준 역방향 스탑이 진입가 근처에서 조기 청산하는 문제를 방지합니다.
 - **캔들 고가(HIGH)로 최고가 갱신:** `current_price`(종가)만 보면 intraday 고점을 놓칩니다. 캔들 HIGH를 함께 비교하여 실제 관측 고점을 정확히 추적합니다.
 - **캔들 저가(LOW)로 손절·트레일 비교:** 종가 기준이면 캔들 내에서 이미 기준선을 이탈한 경우를 다음 틱까지 감지하지 못합니다. 캔들 LOW를 비교 기준으로 사용해 intraday 이탈을 즉시 감지합니다.
+- **진입 봉 intraday 배제 (휩쏘 방지):** 진입 직후의 캔들(특히 진입탐색용 일봉)은 _진입 이전_ 가격까지 고저가에 포함합니다. 그 고가로 최고가를 부풀리고 같은 봉의 진입 전 저가로 트레일/손절을 트리거하면, 매수 1봉 만에 같은 가격으로 즉시 청산되는 휩쏘가 발생합니다(예: 일봉 진입 시 당일 새벽 저가가 트레일을 트리거). 따라서 **봉 시작 시각이 진입 시각 이후인 봉에서만** intraday 고저가를 사용하고, 진입 봉에서는 현재가(종가)만 사용합니다. 진입 시각(`_position_entry_ts`)은 신규 진입 시 기록하며, 재시작·`/sync`·`/pyramid_set`처럼 진입 시각을 알 수 없는 오래된 포지션은 그대로 intraday 값을 사용합니다. 아울러 매수 즉시 `_held_markets`에 추가해, `monitor_loop`(5분 주기) 갱신 전까지 진입탐색용 캔들 단위가 유지되는 시간을 없앱니다.
 - **최고가 DB 영속화:** `_position_highest`가 재시작마다 초기화되면 트레일링 스탑 기준선이 낮아집니다. `highest_price` 컬럼을 `pyramid_state` 테이블에 저장하고 최고가 갱신 시마다 즉시 커밋합니다.
 
 ### 재시작 시 최고가 복원 순서

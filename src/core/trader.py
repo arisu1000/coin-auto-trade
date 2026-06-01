@@ -73,6 +73,9 @@ class Trader:
         self._pyramid_repo = None  # PyramidStateRepository (초기화 후 설정)
         # 포지션 보유 중 추적한 최고가 (직접 트레일 스탑 기준)
         self._position_highest: dict[str, float] = {}
+        # 신규 진입 시각(naive UTC). 진입 봉(또는 진입 이전 가격을 포함하는 봉)의
+        # intraday 고저가를 손절·트레일 판정에서 배제해 진입 직후 휩쏘를 막는다.
+        self._position_entry_ts: dict[str, datetime] = {}
         # 거래지원 종료 예정(투자유의) 마켓: BUY 차단 + 포지션 자동 청산
         self._warned_markets: set[str] = set()
         # 매수 제외 마켓: {market: reason} (설정값 + 텔레그램 동적 추가)
@@ -433,18 +436,24 @@ class Trader:
                             if not self._pyramid_add_allowed(market, current_price, strategy):
                                 decision = "HOLD"
 
-                        # 직접 손절/트레일 체크: 시뮬레이션이 실제 진입가를 모를 때 대비
-                        # (캔들 윈도우 밖 진입, /sync·/pyramid_set 수동 등록 케이스)
-                        if decision != "SELL" and market in self._pyramid_state:
+                        # 포지션 보유 중: 실제 진입가(_pyramid_state) 기준으로 손절·트레일 재검증
+                        # generate_signals()는 캔들 전체를 처음부터 재시뮬레이션하므로
+                        # 실제 진입 시점·가격과 달라 엉뚱한 SELL을 낼 수 있음 (예: 재진입 직후)
+                        # → 항상 _check_position_exit으로 재검증하고, 실제 상태 기준 결과를 우선
+                        if market in self._pyramid_state:
                             prev_highest = self._position_highest.get(market, 0)
                             direct = self._check_position_exit(
                                 market, current_price, strategy,
                                 candle_high=candle_high,
                                 candle_low=candle_low,
+                                candle_ts=df.index[-1].to_pydatetime(),
                             )
                             if direct == "SELL":
                                 decision = "SELL"
                             else:
+                                if decision == "SELL":
+                                    # 시뮬레이션이 SELL이어도 실제 상태 기준으론 조건 미충족
+                                    decision = "HOLD"
                                 new_highest = self._position_highest.get(market, 0)
                                 if new_highest > prev_highest and self._pyramid_repo:
                                     s = self._pyramid_state[market]
@@ -547,6 +556,8 @@ class Trader:
                 stale = [m for m in list(self._pyramid_state) if m not in self._held_markets]
                 for market in stale:
                     self._pyramid_state.pop(market, None)
+                    self._position_highest.pop(market, None)
+                    self._position_entry_ts.pop(market, None)
                     if self._pyramid_repo:
                         await self._pyramid_repo.delete(market)
                     logger.info("pyramid_state_auto_cleaned", market=market)
@@ -667,10 +678,16 @@ class Trader:
                         agent_thread_id=f"main_{market}",
                     )
 
+                # 보유 마켓 즉시 반영: monitor_loop(5분 주기) 갱신 전까지 진입 종목이
+                # 누락돼 _fetch_candles가 진입탐색용(일봉 등) 캔들을 계속 쓰는 것을 방지
+                self._held_markets.add(market)
+
                 # 피라미딩 상태 갱신 및 DB 저장
                 if market not in self._pyramid_state:
                     self._pyramid_state[market] = {"entry_price": current_price, "add_count": 0}
                     self._position_highest[market] = current_price  # 신규 진입
+                    # 진입 봉 intraday 배제용 진입 시각 기록 (naive UTC)
+                    self._position_entry_ts[market] = datetime.now(timezone.utc).replace(tzinfo=None)
                     # 신규 진입 시 쿨다운 해제
                     self._sell_cooldown.pop(market, None)
                     if self._pyramid_repo:
@@ -740,6 +757,7 @@ class Trader:
                 # 피라미딩 상태 초기화 및 DB 삭제
                 self._pyramid_state.pop(market, None)
                 self._position_highest.pop(market, None)
+                self._position_entry_ts.pop(market, None)
                 if self._pyramid_repo:
                     await self._pyramid_repo.delete(market)
 
@@ -838,6 +856,7 @@ class Trader:
         strategy,
         candle_high: float | None = None,
         candle_low: float | None = None,
+        candle_ts: datetime | None = None,
     ) -> str:
         """_pyramid_state 기준으로 손절·트레일 조건을 직접 확인한다.
 
@@ -847,6 +866,7 @@ class Trader:
 
         candle_high: 해당 캔들의 고가 — 최고가 갱신에 사용 (intraday 고점 반영)
         candle_low:  해당 캔들의 저가 — 손절·트레일 비교에 사용 (intraday 이탈 감지)
+        candle_ts:   해당 캔들의 시작 시각(naive UTC) — 진입 봉 판별에 사용
         """
         state = self._pyramid_state.get(market)
         if state is None:
@@ -856,13 +876,27 @@ class Trader:
         stop_pct = getattr(strategy, "stop_pct", 10.0)
         trail_pct = getattr(strategy, "trail_pct", 10.0)
 
-        # 최고가 갱신: 캔들 고가(intraday high)까지 반영
+        # 진입 봉 intraday 배제: 진입 직후의 캔들은 진입 이전 가격까지 고저가에 포함한다.
+        # 그 고가로 최고가를 부풀리고 같은 봉의 (진입 전) 저가로 트레일/손절을 트리거하면
+        # 진입 1봉 안에서 즉시 청산되는 휩쏘가 발생한다(예: 일봉 진입 시 당일 새벽 저가).
+        # 봉 시작 시각이 진입 시각 이후인 "완전히 진입 후 봉"에서만 intraday 값을 사용한다.
+        # entry_ts가 없으면(재시작·수동 등록) 오래된 포지션이므로 그대로 사용한다.
+        entry_ts = self._position_entry_ts.get(market)
+        bar_after_entry = (
+            entry_ts is None
+            or candle_ts is None
+            or candle_ts >= entry_ts
+        )
+        eff_high = candle_high if bar_after_entry else None
+        eff_low = candle_low if bar_after_entry else None
+
+        # 최고가 갱신: (진입 후 봉이면) 캔들 고가까지 반영, 아니면 현재가만
         prev_highest = self._position_highest.get(market, entry_price)
-        highest = max(prev_highest, current_price, candle_high or 0)
+        highest = max(prev_highest, current_price, eff_high or 0)
         self._position_highest[market] = highest
 
-        # 비교 기준: 캔들 저가 우선 — intraday 이탈도 감지
-        check_price = candle_low if candle_low is not None else current_price
+        # 비교 기준: (진입 후 봉이면) 캔들 저가 우선 — intraday 이탈도 감지
+        check_price = eff_low if eff_low is not None else current_price
 
         stop_threshold = entry_price * (1 - stop_pct / 100)
         trail_threshold = highest * (1 - trail_pct / 100)
