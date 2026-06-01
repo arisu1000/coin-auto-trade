@@ -819,6 +819,8 @@ class Trader:
         for market in list(self._pyramid_state):
             if market not in held:
                 self._pyramid_state.pop(market)
+                self._position_highest.pop(market, None)
+                self._position_entry_ts.pop(market, None)
                 if self._pyramid_repo:
                     await self._pyramid_repo.delete(market)
                 removed.append(market)
