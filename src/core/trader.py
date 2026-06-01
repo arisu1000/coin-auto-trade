@@ -388,26 +388,9 @@ class Trader:
     # ── 전략/에이전트 루프 ───────────────────────────────────────────
 
     async def _strategy_loop(self) -> None:
-        """AI 에이전트 분석 → 주문 실행 루프"""
-        # 첫 데이터 수집 대기
-        await asyncio.sleep(self._settings.trade_interval_seconds * 2)
-
-        # 재시작 후 DB에 최고가가 없는 포지션은 캔들 히스토리 고가로 보정
-        # (재시작 전 최고가를 잃었을 때 entry_price 대신 실제 관측 고가로 초기화)
-        for mkt, state in self._pyramid_state.items():
-            if not state.get("highest_price"):
-                df_init = self._latest_candles.get(mkt)
-                if df_init is not None and len(df_init) > 0:
-                    hist_high = float(df_init["high"].max())
-                    restored = max(hist_high, state["entry_price"])
-                    self._position_highest[mkt] = restored
-                    logger.info(
-                        "position_highest_restored_from_candles",
-                        market=mkt,
-                        entry_price=round(state["entry_price"]),
-                        candle_high=round(hist_high),
-                        restored_to=round(restored),
-                    )
+        """전략 결정 → 주문 실행 루프 (피라미딩: 직접 시그널 / 그 외: AI 에이전트)."""
+        await asyncio.sleep(self._settings.trade_interval_seconds * 2)  # 첫 데이터 수집 대기
+        self._restore_highest_from_candles()
 
         while self._running:
             try:
@@ -424,94 +407,19 @@ class Trader:
                     if df is None or len(df) < 50:
                         continue
 
-                    allow_buy = market in target_set
                     strategy = self._strategy_manager.get_active()
                     is_pyramid = strategy is not None and "pyramid" in strategy.name
 
                     if is_pyramid:
-                        current_price = float(df["close"].iloc[-1])
-                        candle_high = float(df["high"].iloc[-1])
-                        candle_low = float(df["low"].iloc[-1])
-
-                        # 피라미딩 전략: generate_signals() 직접 호출 (LangGraph 우회)
-                        signals = strategy.generate_signals(df)
-                        last_signal = int(signals.iloc[-1])
-                        # -2(SHORT), +2(COVER)는 업비트 현물에서 불가 → HOLD 처리
-                        decision = {1: "BUY", -1: "SELL"}.get(last_signal, "HOLD")
-
-                        # BUY 신호: 실제 실행 가능한 레벨인지 확인 (중복 실행 방지)
-                        if decision == "BUY":
-                            if not self._pyramid_add_allowed(market, current_price, strategy):
-                                decision = "HOLD"
-
-                        # 포지션 보유 중: 실제 진입가(_pyramid_state) 기준으로 손절·트레일 재검증
-                        # generate_signals()는 캔들 전체를 처음부터 재시뮬레이션하므로
-                        # 실제 진입 시점·가격과 달라 엉뚱한 SELL을 낼 수 있음 (예: 재진입 직후)
-                        # → 항상 _check_position_exit으로 재검증하고, 실제 상태 기준 결과를 우선
-                        if market in self._pyramid_state:
-                            prev_highest = self._position_highest.get(market, 0)
-                            direct = self._check_position_exit(
-                                market, current_price, strategy,
-                                candle_high=candle_high,
-                                candle_low=candle_low,
-                                candle_ts=df.index[-1].to_pydatetime(),
-                            )
-                            if direct == "SELL":
-                                decision = "SELL"
-                            else:
-                                if decision == "SELL":
-                                    # 시뮬레이션이 SELL이어도 실제 상태 기준으론 조건 미충족
-                                    decision = "HOLD"
-                                new_highest = self._position_highest.get(market, 0)
-                                if new_highest > prev_highest and self._pyramid_repo:
-                                    s = self._pyramid_state[market]
-                                    await self._pyramid_repo.save(
-                                        market, s["entry_price"], s["add_count"],
-                                        partial_taken=s.get("partial_taken", False),
-                                        highest_price=new_highest,
-                                    )
-
-                        # 직접 피라미딩 추가매수 체크: generate_signals() 시뮬레이션 내부
-                        # add_count가 _pyramid_state와 불일치할 때(캔들 윈도우 밖 진입·수동 등록)
-                        # 시뮬레이션이 HOLD를 반환해도 실제 기준가를 돌파한 경우 BUY 강제
-                        if decision == "HOLD" and market in self._pyramid_state:
-                            if self._pyramid_add_allowed(market, current_price, strategy):
-                                decision = "BUY"
-
-                        # 부분 익절 체크 (전량 매도가 아닌 경우에만)
-                        if decision != "SELL" and market in self._pyramid_state:
-                            if self._check_partial_take(market, current_price):
-                                await self._execute_partial_sell(market, current_price)
-
-                        confidence = 1.0
-                        override_amount = getattr(strategy, "unit_amount", None)
-                        agent_result = {
-                            "judge_reasoning": f"{strategy.name} 전략 시그널",
-                            "judge_confidence": confidence,
-                            "position_size_pct": 0.0,
-                        }
+                        decision, agent_result, override_amount = \
+                            await self._decide_pyramid(market, df, strategy)
                     else:
-                        # AI 에이전트 워크플로우 실행
-                        snapshot = self._build_snapshot(market, df)
-                        state = self._build_initial_state(snapshot)
-                        agent_result = await self._workflow.ainvoke(
-                            state,
-                            config={"configurable": {"thread_id": f"main_{market}"}},
-                        )
-                        decision = agent_result.get("judge_decision", "HOLD")
-                        confidence = agent_result.get("judge_confidence", 0.0)
-                        override_amount = None
+                        decision, agent_result, override_amount = \
+                            await self._decide_with_agents(market, df)
 
-                    # 매수 제외 마켓 차단
-                    if decision == "BUY" and market in self._excluded_markets:
-                        logger.info("buy_blocked_excluded", market=market,
-                                    reason=self._excluded_markets[market])
-                        decision = "HOLD"
-
-                    # 거래지원 종료 예정 마켓 매수 차단
-                    if decision == "BUY" and market in self._warned_markets:
-                        logger.info("buy_blocked_market_warning", market=market)
-                        decision = "HOLD"
+                    decision = self._apply_buy_blocks(market, decision)
+                    confidence = agent_result.get("judge_confidence", 0.0)
+                    allow_buy = market in target_set
 
                     logger.info(
                         "strategy_decision",
@@ -537,6 +445,134 @@ class Trader:
             except Exception as e:
                 logger.error("strategy_loop_error", error=str(e))
                 await asyncio.sleep(10)
+
+    def _restore_highest_from_candles(self) -> None:
+        """재시작 후 DB에 최고가가 없는 포지션을 캔들 히스토리 고가로 보정한다.
+
+        재시작 전 최고가를 잃었을 때 entry_price 대신 실제 관측 고가로 초기화해
+        트레일링 스탑 기준선이 부당하게 낮아지는 것을 막는다.
+        """
+        for mkt, state in self._pyramid_state.items():
+            if state.get("highest_price"):
+                continue
+            df_init = self._latest_candles.get(mkt)
+            if df_init is None or len(df_init) == 0:
+                continue
+            hist_high = float(df_init["high"].max())
+            restored = max(hist_high, state["entry_price"])
+            self._position_highest[mkt] = restored
+            logger.info(
+                "position_highest_restored_from_candles",
+                market=mkt,
+                entry_price=round(state["entry_price"]),
+                candle_high=round(hist_high),
+                restored_to=round(restored),
+            )
+
+    async def _decide_pyramid(
+        self, market: str, df: pd.DataFrame, strategy
+    ) -> tuple[str, dict, float | None]:
+        """피라미딩 전략의 매매 결정을 산출한다 (LangGraph 우회, generate_signals 직접 사용).
+
+        보유 중이면 실제 진입가(_pyramid_state) 기준으로 손절·트레일을 재검증하고,
+        필요 시 추가매수/부분익절을 처리한다.
+
+        반환: (decision, agent_result, override_amount)
+        """
+        current_price = float(df["close"].iloc[-1])
+        candle_high = float(df["high"].iloc[-1])
+        candle_low = float(df["low"].iloc[-1])
+
+        # 마지막 봉 시그널 → 결정. -2(SHORT)·+2(COVER)는 현물 불가 → HOLD
+        last_signal = int(strategy.generate_signals(df).iloc[-1])
+        decision = {1: "BUY", -1: "SELL"}.get(last_signal, "HOLD")
+
+        # BUY 신호: 실제 실행 가능한 레벨인지 확인 (중복 실행 방지)
+        if decision == "BUY" and not self._pyramid_add_allowed(market, current_price, strategy):
+            decision = "HOLD"
+
+        if market in self._pyramid_state:
+            decision = await self._reconcile_pyramid_exit(
+                market, decision, current_price, strategy,
+                candle_high, candle_low, df.index[-1].to_pydatetime(),
+            )
+
+            # 시뮬레이션 add_count가 실제 상태와 불일치(캔들 윈도우 밖 진입·수동 등록)해
+            # HOLD를 내도, 실제 기준가를 돌파했으면 추가매수를 강제한다.
+            if decision == "HOLD" and self._pyramid_add_allowed(market, current_price, strategy):
+                decision = "BUY"
+
+            # 부분 익절 (전량 매도가 아닐 때만)
+            if decision != "SELL" and self._check_partial_take(market, current_price):
+                await self._execute_partial_sell(market, current_price)
+
+        agent_result = {
+            "judge_reasoning": f"{strategy.name} 전략 시그널",
+            "judge_confidence": 1.0,
+            "position_size_pct": 0.0,
+        }
+        override_amount = getattr(strategy, "unit_amount", None)
+        return decision, agent_result, override_amount
+
+    async def _reconcile_pyramid_exit(
+        self, market: str, decision: str, current_price: float, strategy,
+        candle_high: float, candle_low: float, candle_ts,
+    ) -> str:
+        """보유 포지션을 실제 진입가 기준으로 재검증해 손절·트레일 결정을 확정한다.
+
+        generate_signals()는 캔들 전체를 재시뮬레이션하므로 실제 진입 시점·가격과
+        달라 엉뚱한 SELL을 낼 수 있다(예: 재진입 직후). _check_position_exit의 실제
+        상태 기준 결과를 우선하고, 갱신된 최고가를 DB에 저장한다.
+        """
+        prev_highest = self._position_highest.get(market, 0)
+        direct = self._check_position_exit(
+            market, current_price, strategy,
+            candle_high=candle_high, candle_low=candle_low, candle_ts=candle_ts,
+        )
+        if direct == "SELL":
+            return "SELL"
+
+        # 시뮬레이션이 SELL이어도 실제 상태 기준으론 조건 미충족 → HOLD
+        if decision == "SELL":
+            decision = "HOLD"
+
+        new_highest = self._position_highest.get(market, 0)
+        if new_highest > prev_highest and self._pyramid_repo:
+            s = self._pyramid_state[market]
+            await self._pyramid_repo.save(
+                market, s["entry_price"], s["add_count"],
+                partial_taken=s.get("partial_taken", False),
+                highest_price=new_highest,
+            )
+        return decision
+
+    async def _decide_with_agents(
+        self, market: str, df: pd.DataFrame
+    ) -> tuple[str, dict, None]:
+        """AI 에이전트 워크플로우(LangGraph)로 매매 결정을 산출한다.
+
+        반환: (decision, agent_result, override_amount=None)
+        """
+        snapshot = self._build_snapshot(market, df)
+        state = self._build_initial_state(snapshot)
+        agent_result = await self._workflow.ainvoke(
+            state,
+            config={"configurable": {"thread_id": f"main_{market}"}},
+        )
+        return agent_result.get("judge_decision", "HOLD"), agent_result, None
+
+    def _apply_buy_blocks(self, market: str, decision: str) -> str:
+        """매수 차단 마켓(설정/텔레그램 제외, 거래지원 종료 예정)이면 BUY를 HOLD로 막는다."""
+        if decision != "BUY":
+            return decision
+        if market in self._excluded_markets:
+            logger.info("buy_blocked_excluded", market=market,
+                        reason=self._excluded_markets[market])
+            return "HOLD"
+        if market in self._warned_markets:
+            logger.info("buy_blocked_market_warning", market=market)
+            return "HOLD"
+        return decision
 
     # ── 모니터링 루프 ────────────────────────────────────────────────
 
