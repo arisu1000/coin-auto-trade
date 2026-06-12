@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     pyramid_partial_take_pct: float = 0.0     # 부분 익절 목표 수익률 % (0 = 비활성, e.g. 20.0 → 진입가 대비 +20%에서 익절)
     pyramid_partial_sell_ratio: float = 0.5   # 부분 익절 시 매도 비율 (0.1~0.9, 기본 50%)
 
+    # ─── 거래대금 급등 감지 ───
+    # 24h 누적 거래대금 순위(top_n)는 후행 지표라 급등 초기에 종목을 놓친다.
+    # 5분마다 전체 KRW 마켓의 거래대금 증가분을 비교해 급등 종목을 즉시 감시 목록에 추가한다.
+    surge_detect_enabled: bool = False        # 거래대금 급등 감지 활성화
+    surge_threshold_krw: float = 300_000_000  # 감지 주기(5분)당 거래대금 증가 절대 임계값 (원)
+    surge_multiplier: float = 10.0            # 해당 종목의 평소(24h 평균) 페이스 대비 최소 배수
+    surge_ttl_minutes: int = 240              # 급등 감지 종목의 감시 유지 시간 (분)
+
     # ─── 매수 제외 마켓 ───
     excluded_markets: str = ""               # 매수를 하지 않을 마켓 목록 (쉼표 구분, e.g. KRW-BTC,KRW-ETH)
 
@@ -95,6 +103,13 @@ class Settings(BaseSettings):
     def validate_candle_count(cls, v: int) -> int:
         if not (1 <= v <= 200):
             raise ValueError("candle_count는 1 이상 200 이하여야 합니다")
+        return v
+
+    @field_validator("surge_threshold_krw", "surge_multiplier", "surge_ttl_minutes")
+    @classmethod
+    def validate_surge_positive(cls, v: float, info) -> float:
+        if v <= 0:
+            raise ValueError(f"{info.field_name}은 0보다 커야 합니다")
         return v
 
     @property

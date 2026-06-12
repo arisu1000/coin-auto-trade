@@ -116,6 +116,7 @@ Kill Switch 확인 (낙폭/손절 체크)
 - [x] 부분 익절 (PYRAMID_PARTIAL_TAKE_PCT)
 - [x] 일일 성과 리포트 (KST 자정 텔레그램 자동 발송)
 - [x] 설정값 핫 리로드 (/reload_settings)
+- [x] 거래대금 급등 종목 즉시 감지 (SURGE_DETECT_ENABLED, 24h 순위 갱신의 후행성 보완)
 - [ ] 공포/탐욕 지수 연동 (Fear & Greed API)
 - [ ] 다중 코인 포트폴리오 리밸런싱
 - [ ] Prometheus + Grafana 메트릭 대시보드
