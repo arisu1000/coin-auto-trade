@@ -63,6 +63,16 @@ class Balance:
     def available(self) -> float:
         return self.balance - self.locked
 
+    @property
+    def total(self) -> float:
+        """주문에 잠긴 수량(locked)을 포함한 총 보유 수량.
+
+        보유 여부 판정은 available이 아닌 total로 해야 한다 — 전량이 미체결
+        주문에 잠긴 동안 available==0이 되어 살아있는 포지션을 미보유로
+        오판하는 것을 막는다.
+        """
+        return self.balance + self.locked
+
 
 @dataclass
 class Order:

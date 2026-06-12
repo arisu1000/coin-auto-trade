@@ -210,11 +210,7 @@ class Trader:
         # 시작 시 현재 보유 코인 파악 (TARGET_MARKETS 외 보유분도 즉시 감시 시작)
         try:
             balances = await self._upbit_ctx.get_balances()
-            self._held_markets = {
-                f"KRW-{b.currency}"
-                for b in balances
-                if b.currency != "KRW" and b.available > 0
-            }
+            self._held_markets = self._markets_held(balances)
             if self._held_markets:
                 logger.info("held_markets_detected", markets=sorted(self._held_markets))
         except Exception as e:
@@ -230,20 +226,53 @@ class Trader:
 
         logger.info("trader_initialized")
 
-    @property
-    def _buy_target_markets(self) -> set[str]:
+    @staticmethod
+    def _markets_held(balances) -> set[str]:
+        """잔고에서 보유 중인 코인의 마켓 코드를 추출한다.
+
+        locked(미체결 주문에 잠긴 수량)도 보유로 간주한다 — 전량이 주문에 잠긴
+        순간 미보유로 오판해 _forget_position이 살아있는 포지션의 피라미딩
+        상태(진입가·최고가·진입시각)를 삭제하는 것을 막는다.
         """
-        매수(BUY)가 허용되는 마켓: 기준 마켓 + 급등 감지 마켓.
+        return {
+            f"KRW-{b.currency}"
+            for b in balances
+            if b.currency != "KRW" and b.total > 0
+        }
+
+    @property
+    def _base_markets(self) -> set[str]:
+        """
+        기준 마켓 집합.
 
         top_n 모드: _dynamic_markets (거래량 상위 N개)
         기본 모드:  TARGET_MARKETS (설정값)
         """
-        base = (
+        return (
             set(self._dynamic_markets)
             if self._settings.target_markets_top_n > 0
             else set(self._settings.markets_list)
         )
-        return base | self._active_surge_markets
+
+    @property
+    def _surge_detect_active(self) -> bool:
+        """급등 감지 동작 여부.
+
+        top_n 모드에서만 동작한다 — 고정 모드의 TARGET_MARKETS는 운영자가 노출을
+        제한하려고 명시한 화이트리스트이므로 급등 감지가 우회해서는 안 된다.
+        설정 핫 리로드로 비활성화하면 이미 감지된 종목도 즉시 매수 대상에서 빠진다.
+        """
+        return (
+            self._settings.surge_detect_enabled
+            and self._settings.target_markets_top_n > 0
+        )
+
+    @property
+    def _buy_target_markets(self) -> set[str]:
+        """매수(BUY)가 허용되는 마켓: 기준 마켓 + 급등 감지 마켓."""
+        if self._surge_detect_active:
+            return self._base_markets | self._active_surge_markets
+        return self._base_markets
 
     @property
     def _active_surge_markets(self) -> set[str]:
@@ -287,17 +316,23 @@ class Trader:
             await asyncio.sleep(0.1)
         return tickers
 
+    def _rank_top_markets(self, tickers: list[dict]) -> list[str]:
+        """24h 거래대금 상위 N개 마켓 코드를 반환한다."""
+        ranked = sorted(
+            tickers,
+            key=lambda t: float(t.get("acc_trade_price_24h") or 0),
+            reverse=True,
+        )
+        return [t["market"] for t in ranked[:self._settings.target_markets_top_n]]
+
     async def _fetch_top_markets(self) -> list[str]:
         """업비트 KRW 마켓 중 24h 거래대금 상위 N개를 반환한다."""
-        top_n = self._settings.target_markets_top_n
-        tickers = await self._fetch_all_tickers()
-        tickers.sort(key=lambda t: float(t.get("acc_trade_price_24h") or 0), reverse=True)
-        return [t["market"] for t in tickers[:top_n]]
+        return self._rank_top_markets(await self._fetch_all_tickers())
 
-    async def _refresh_top_markets(self) -> None:
+    async def _refresh_top_markets(self, tickers: list[dict]) -> None:
         """top_n 마켓 목록을 갱신하고 변경 사항을 텔레그램으로 알린다."""
         try:
-            new_markets = await self._fetch_top_markets()
+            new_markets = self._rank_top_markets(tickers)
             prev = set(self._dynamic_markets)
             curr = set(new_markets)
 
@@ -317,7 +352,18 @@ class Trader:
         except Exception as e:
             logger.error("top_markets_refresh_failed", error=str(e))
 
-    async def _detect_surge_markets(self) -> None:
+    def _prune_surge_markets(self, now: datetime) -> None:
+        """TTL이 만료됐거나 경고·제외 지정된 급등 감시 종목을 제거한다."""
+        for market in list(self._surge_markets):
+            if self._surge_markets[market] <= now:
+                del self._surge_markets[market]
+                logger.info("surge_market_expired", market=market)
+            elif market in self._warned_markets or market in self._excluded_markets:
+                del self._surge_markets[market]
+                logger.info("surge_market_dropped", market=market,
+                            reason="warned_or_excluded")
+
+    async def _detect_surge_markets(self, tickers: list[dict] | None = None) -> None:
         """단기 거래대금 급증 종목을 감지해 즉시 감시 목록에 추가한다.
 
         24h 누적 거래대금 순위(top_n)는 후행 지표라, 거래량이 폭발해도 상위권에
@@ -327,11 +373,22 @@ class Trader:
           1. Δ ≥ surge_threshold_krw (5분 환산 절대 임계값)
           2. Δ ≥ 해당 종목의 평소 페이스(24h 평균을 동일 구간으로 환산) × surge_multiplier
         조건 2 덕분에 평소 거래대금이 큰 종목(BTC 등)은 오탐되지 않는다.
+
+        동시 감시 종목 수는 surge_max_markets로 제한한다 — 장 전체 급등 국면에서
+        상관관계 높은 다수 종목에 잔고를 분산 소진하는 것을 막는다.
+
+        tickers: 같은 틱에서 이미 조회한 전체 티커가 있으면 재사용 (None이면 직접 조회).
         """
-        try:
-            tickers = await self._fetch_all_tickers()
-        except Exception as e:
-            logger.error("surge_detect_failed", error=str(e))
+        if tickers is None:
+            try:
+                tickers = await self._fetch_all_tickers()
+            except Exception as e:
+                logger.error("surge_detect_failed", error=str(e))
+                return
+        if not tickers:
+            # 빈 응답으로 기준 스냅샷을 덮어쓰면 다음 틱이 재기준선만 기록하게 되어
+            # 감지가 조용히 무력화되므로, 기존 스냅샷을 보존한다
+            logger.warning("surge_detect_empty_tickers")
             return
 
         now = datetime.now(timezone.utc)
@@ -342,11 +399,7 @@ class Trader:
         }
         self._acc_trade_snapshot_at = now
 
-        # 만료된 급등 감시 종목 정리
-        expired = [m for m, exp in self._surge_markets.items() if exp <= now]
-        for market in expired:
-            del self._surge_markets[market]
-            logger.info("surge_market_expired", market=market)
+        self._prune_surge_markets(now)
 
         if not prev_snapshot or prev_at is None:
             return  # 첫 호출: 기준 스냅샷만 기록
@@ -358,7 +411,8 @@ class Trader:
         # 임계값은 "5분당" 기준이므로 실제 경과 시간에 비례해 환산
         threshold = self._settings.surge_threshold_krw * (elapsed / 300)
         expires_at = now + timedelta(minutes=self._settings.surge_ttl_minutes)
-        detected: list[tuple[str, float, float]] = []
+        base_markets = self._base_markets
+        candidates: list[tuple[float, str, float]] = []  # (delta, market, baseline)
 
         for market, acc_now in self._acc_trade_snapshot.items():
             acc_prev = prev_snapshot.get(market)
@@ -371,20 +425,26 @@ class Trader:
             baseline = acc_prev * (elapsed / 86400)
             if delta < baseline * self._settings.surge_multiplier:
                 continue
+            if market in base_markets:
+                continue  # 이미 정규 감시 대상: 추적 의미 없음 (top_n 이탈 알림과의 모순 방지)
             if market in self._warned_markets or market in self._excluded_markets:
                 continue
             if market in self._surge_markets:
                 self._surge_markets[market] = expires_at  # 급등 지속: 감시 연장
                 continue
-            self._surge_markets[market] = expires_at
-            detected.append((market, delta, baseline))
+            candidates.append((delta, market, baseline))
 
-        base_markets = (
-            set(self._dynamic_markets)
-            if self._settings.target_markets_top_n > 0
-            else set(self._settings.markets_list)
-        )
-        for market, delta, baseline in detected:
+        # 동시 감시 상한: 남은 슬롯만큼 Δ가 큰 순서로 채운다
+        slots = self._settings.surge_max_markets - len(self._surge_markets)
+        candidates.sort(reverse=True)
+        if len(candidates) > max(slots, 0):
+            logger.warning(
+                "surge_cap_reached",
+                cap=self._settings.surge_max_markets,
+                skipped=[m for _, m, _ in candidates[max(slots, 0):]],
+            )
+        for delta, market, baseline in candidates[:max(slots, 0)]:
+            self._surge_markets[market] = expires_at
             logger.info(
                 "surge_market_detected",
                 market=market,
@@ -392,13 +452,13 @@ class Trader:
                 baseline_krw=round(baseline),
                 ttl_minutes=self._settings.surge_ttl_minutes,
             )
-            if self._bot and market not in base_markets:
+            if self._bot:
                 multiple = delta / baseline if baseline > 0 else float("inf")
                 await self._bot.send_alert(
                     f"🚀 <b>거래대금 급등 감지</b>\n"
                     f"{market}: 최근 {elapsed / 60:.0f}분간 {delta / 1e8:.1f}억원 "
                     f"(평소 페이스의 {multiple:.0f}배)\n"
-                    f"→ {self._settings.surge_ttl_minutes // 60}시간 동안 감시 목록에 추가"
+                    f"→ {self._settings.surge_ttl_minutes}분 동안 감시 목록에 추가"
                 )
 
     async def _refresh_warned_markets(self) -> None:
@@ -692,11 +752,7 @@ class Trader:
                 total_equity = krw + coin_value
 
                 # 보유 코인 목록 갱신 (_active_markets에 반영)
-                self._held_markets = {
-                    f"KRW-{b.currency}"
-                    for b in balances
-                    if b.currency != "KRW" and b.available > 0
-                }
+                self._held_markets = self._markets_held(balances)
 
                 # 피라미딩 상태 자동 정리: 잔고 없는 종목 제거
                 stale = [m for m in list(self._pyramid_state) if m not in self._held_markets]
@@ -719,15 +775,22 @@ class Trader:
                 await self._check_low_krw(krw)
 
                 # top_n 모드: 1시간마다 마켓 목록 갱신
+                # (티커는 급등 감지와 공유해 같은 틱의 중복 전체 조회를 막는다)
+                shared_tickers: list[dict] | None = None
                 if self._settings.target_markets_top_n > 0:
                     self._market_refresh_ticks += 1
                     if self._market_refresh_ticks >= 12:
-                        await self._refresh_top_markets()
+                        try:
+                            shared_tickers = await self._fetch_all_tickers()
+                        except Exception as e:
+                            logger.error("top_markets_refresh_failed", error=str(e))
+                        if shared_tickers:
+                            await self._refresh_top_markets(shared_tickers)
                         self._market_refresh_ticks = 0
 
                 # 거래대금 급등 감지 (매 5분, 24h 순위 갱신의 후행성 보완)
-                if self._settings.surge_detect_enabled:
-                    await self._detect_surge_markets()
+                if self._surge_detect_active:
+                    await self._detect_surge_markets(shared_tickers)
 
                 await asyncio.sleep(300)  # 5분
             except asyncio.CancelledError:
@@ -1379,6 +1442,11 @@ class Trader:
             ("pyramid_sell_cooldown_minutes", "재진입 쿨다운"),
             ("pyramid_partial_take_pct", "부분 익절 목표"),
             ("pyramid_partial_sell_ratio", "부분 익절 비율"),
+            ("surge_detect_enabled", "급등 감지"),
+            ("surge_threshold_krw", "급등 임계 거래대금"),
+            ("surge_multiplier", "급등 배수"),
+            ("surge_ttl_minutes", "급등 감시 유지"),
+            ("surge_max_markets", "급등 동시 감시 수"),
         ]
         for field, label in simple_fields:
             old_val = getattr(self._settings, field, None)

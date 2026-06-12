@@ -1,5 +1,5 @@
 from functools import lru_cache
-from pydantic import SecretStr, field_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,10 +55,12 @@ class Settings(BaseSettings):
     # ─── 거래대금 급등 감지 ───
     # 24h 누적 거래대금 순위(top_n)는 후행 지표라 급등 초기에 종목을 놓친다.
     # 5분마다 전체 KRW 마켓의 거래대금 증가분을 비교해 급등 종목을 즉시 감시 목록에 추가한다.
+    # top_n 모드(TARGET_MARKETS_TOP_N > 0)에서만 동작 — 고정 화이트리스트는 우회하지 않는다.
     surge_detect_enabled: bool = False        # 거래대금 급등 감지 활성화
     surge_threshold_krw: float = 300_000_000  # 감지 주기(5분)당 거래대금 증가 절대 임계값 (원)
     surge_multiplier: float = 10.0            # 해당 종목의 평소(24h 평균) 페이스 대비 최소 배수
     surge_ttl_minutes: int = 240              # 급등 감지 종목의 감시 유지 시간 (분)
+    surge_max_markets: int = 5                # 동시 감시 가능한 급등 종목 수 (장 전체 급등 시 분산 매수 제한)
 
     # ─── 매수 제외 마켓 ───
     excluded_markets: str = ""               # 매수를 하지 않을 마켓 목록 (쉼표 구분, e.g. KRW-BTC,KRW-ETH)
@@ -105,12 +107,17 @@ class Settings(BaseSettings):
             raise ValueError("candle_count는 1 이상 200 이하여야 합니다")
         return v
 
-    @field_validator("surge_threshold_krw", "surge_multiplier", "surge_ttl_minutes")
-    @classmethod
-    def validate_surge_positive(cls, v: float, info) -> float:
-        if v <= 0:
-            raise ValueError(f"{info.field_name}은 0보다 커야 합니다")
-        return v
+    @model_validator(mode="after")
+    def validate_surge_settings(self) -> "Settings":
+        # 비활성 상태에서는 값을 쓰지 않으므로 검증하지 않는다
+        # (이 코드베이스의 "0 = 비활성" 관례를 따라 0을 넣어도 부팅이 실패하지 않도록)
+        if not self.surge_detect_enabled:
+            return self
+        for name in ("surge_threshold_krw", "surge_multiplier",
+                     "surge_ttl_minutes", "surge_max_markets"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"surge_detect_enabled=true이면 {name}은 0보다 커야 합니다")
+        return self
 
     @property
     def markets_list(self) -> list[str]:
